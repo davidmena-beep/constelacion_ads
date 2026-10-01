@@ -1,6 +1,11 @@
 <!DOCTYPE html>
 <!--
-  Index.html — Carcasa de la Web App · Versión 1.2.0 (2026-10-01)
+  Index.html — Carcasa de la Web App · Versión 1.6.0 (2026-10-01)
+  v1.6.0: tema «Blanco» por defecto (paneles y menús en papel claro sobre cielo mate; sin neón). Temas disponibles: blanco · sobrio · claro · galaxia (window.ADS_TEMA).
+  v1.5.0: tema interior «Sobrio» por defecto (sin neón; azul pizarra mate) + alternativas «claro» y «galaxia» (window.ADS_TEMA). El inicio de sesión no cambia.
+  v1.4.0: nuevo aspecto «Galaxia» (cielo animado, paleta profunda, paneles de vidrio, inicio inmersivo con constelación). Sin cambios funcionales.
+  v1.3.0: modo DEMO integrado (datos en memoria, usuarios de prueba) que se activa solo mientras la URL de Apps Script no esté configurada.
+  v1.2.1: la URL de Apps Script se escribe dentro del propio index.html (bloque CONFIGURACIÓN); ya no se usa public/config.js.
   v1.2.0: conexión por fetch (API_URL) para publicar fuera de Apps Script (GitHub + Bolt); dentro de Apps Script funciona igual que antes.
   v1.1.0: importación de evaluaciones desde Excel (una hoja, con detección de fórmulas de ponderación) · inicio con logo y textos ADS + ojo de clave · carga por lista en Catálogos y Usuarios.
   v1.0.0: versión inicial.
@@ -10,12 +15,3760 @@
 <html lang="es">
 <head>
   <base target="_top">
-  <script src="/config.js"></script>
+  <!-- ═══ CONFIGURACIÓN ═══ Pega entre las comillas la URL de la implementación de Apps Script (termina en /exec) -->
+  <script>window.ADS_API_URL = 'PEGA_AQUI_LA_URL_DE_APPS_SCRIPT';</script>
+  <!-- Tema interior de la app: 'blanco' (por defecto) · 'sobrio' · 'claro' · 'galaxia' (el inicio de sesión siempre es galaxia) -->
+  <script>window.ADS_TEMA = 'blanco';</script>
+  <!-- MODO DEMO: solo se ejecuta mientras la URL de Apps Script no esté configurada (datos en memoria; se reinician al recargar) -->
+  <script>if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(window.ADS_API_URL || '')) { (function () {
+/**
+ * Esquema.gs — Definición única del modelo de datos (pestañas de Google Sheets).
+ * Fuente de verdad para: Setup (crea pestañas), Db (tipifica lecturas) y ESQUEMA_BD.md (generado).
+ * Tipos: texto | entero | decimal | bool | fecha (ISO-8601 guardado como texto) | json (texto)
+ * Cada columna: [nombre, tipo, nota]
+ */
+var ESQUEMA = {
+
+  // ── CATÁLOGOS ─────────────────────────────────────────────────────────────
+  Sucursales: { pk: 'id_sucursal', prefijo: 'SUC', grupo: 'Catálogos', cols: [
+    ['id_sucursal', 'texto', 'PK. SUC-001…'],
+    ['nombre', 'texto', 'Único (sin distinguir mayúsculas). Valor del campo "Sucursal" del libro (Inicio!B8)'],
+    ['activo', 'bool', 'FALSE = oculta en listas nuevas; los históricos se conservan']
+  ]},
+  Areas: { pk: 'id_area', prefijo: 'ARE', grupo: 'Catálogos', cols: [
+    ['id_area', 'texto', 'PK. ARE-001…'],
+    ['nombre', 'texto', 'Único. Requerido por la analítica "por área"; NO existe en el Excel (ver notas)'],
+    ['activo', 'bool', '']
+  ]},
+
+  // ── USUARIOS ──────────────────────────────────────────────────────────────
+  Usuarios: { pk: 'id_usuario', prefijo: 'USR', grupo: 'Usuarios', cols: [
+    ['id_usuario', 'texto', 'PK. USR-0001…'],
+    ['usuario', 'texto', 'Login único en minúsculas'],
+    ['nombre', 'texto', 'Inicio!B6 "Nombre"'],
+    ['cargo', 'texto', 'Inicio!B7 "Cargo"'],
+    ['id_sucursal', 'texto', 'FK → Sucursales. Inicio!B8 "Sucursal"'],
+    ['id_area', 'texto', 'FK → Areas (opcional)'],
+    ['rol', 'texto', 'Administrador | Colaborador'],
+    ['estado', 'texto', 'Activo | Inactivo (habilitar / deshabilitar)'],
+    ['clave_hash', 'texto', 'SHA-256(salt + clave). Nunca se guarda la clave en claro'],
+    ['clave_salt', 'texto', 'Sal aleatoria por usuario'],
+    ['debe_cambiar_clave', 'bool', 'TRUE tras crear usuario o restablecer clave'],
+    ['creado_en', 'fecha', ''],
+    ['ultimo_acceso', 'fecha', '']
+  ]},
+
+  // ── EVALUACIONES (tests y matrices) ───────────────────────────────────────
+  Evaluaciones: { pk: 'id_evaluacion', prefijo: 'EV', grupo: 'Evaluaciones', cols: [
+    ['id_evaluacion', 'texto', 'PK. EV-T01, EV-M03…'],
+    ['codigo', 'texto', 'Único. T01–T06 tests, M01–M07 matrices'],
+    ['orden', 'entero', 'Orden de presentación (índice del libro)'],
+    ['tipo', 'texto', 'TEST | MATRIZ'],
+    ['motor', 'texto', 'ESCALA_AREAS | MARCAS_EXACTAS | ESCALA_FACTORES | ELECCION_BINARIA | SITUACIONAL | ESCALA_DISCRETA | MATRIZ'],
+    ['nombre', 'texto', 'Título en la hoja del libro'],
+    ['descripcion', 'texto', 'Inicio!C18:C30 "Qué haces ahí"'],
+    ['instruccion', 'texto', 'Texto de instrucciones de la hoja (fila 3)'],
+    ['escala_json', 'json', 'Rango/valores válidos y etiquetas de la escala de respuesta'],
+    ['config_json', 'json', 'Parámetros del motor (marcas=20, max_por_factor=30, orientaciones…) o de la matriz (max_filas, ejemplo, fila_yo)'],
+    ['nota', 'texto', 'Aviso del libro (p. ej. "no es un instrumento psicométrico validado")'],
+    ['estado', 'texto', 'Borrador → Habilitada → Publicada'],
+    ['version', 'entero', 'Se incrementa con cada cambio de contenido'],
+    ['publicada_en', 'fecha', ''],
+    ['actualizado_en', 'fecha', '']
+  ]},
+  Dimensiones: { pk: 'id_dimension', grupo: 'Evaluaciones', cols: [
+    ['id_dimension', 'texto', 'PK. T02-V, T06-CER…'],
+    ['id_evaluacion', 'texto', 'FK → Evaluaciones'],
+    ['codigo', 'texto', 'Código corto (V, L, GLO, Q1, CER, SAL…), único dentro de la evaluación'],
+    ['nombre', 'texto', 'Visual, Logro, Global, Supervisor, Cerebro, Salud…'],
+    ['grupo', 'texto', 'Agrupación: parte del metaprograma, cuadrante AT/BR, orientación de rol'],
+    ['orden', 'entero', ''],
+    ['desempate', 'decimal', 'Sumando de desempate del libro (+0.09 … +0.01); 0 si no aplica'],
+    ['descripcion', 'texto', 'Texto literal del libro para esa dimensión']
+  ]},
+  Preguntas: { pk: 'id_pregunta', grupo: 'Evaluaciones', cols: [
+    ['id_pregunta', 'texto', 'PK. T01-P001…'],
+    ['id_evaluacion', 'texto', 'FK → Evaluaciones'],
+    ['orden', 'entero', ''],
+    ['numero', 'entero', 'Número mostrado (el del libro)'],
+    ['seccion', 'texto', 'Encabezado de bloque (ÁREA SALUD, PARTE 1…); vacío si no aplica'],
+    ['texto', 'texto', 'Afirmación / palabra / situación, literal del libro'],
+    ['dimension', 'texto', 'Código de Dimensiones que suma esta pregunta (VAK, Motivacionales, Belbin, Rueda). Vacío si la clave va en Opciones'],
+    ['activa', 'bool', '']
+  ]},
+  Opciones: { pk: 'id_opcion', grupo: 'Evaluaciones', cols: [
+    ['id_opcion', 'texto', 'PK. T05-P003-c'],
+    ['id_pregunta', 'texto', 'FK → Preguntas'],
+    ['letra', 'texto', 'A/B (Metaprogramas) o a/b/c/d (Liderazgo)'],
+    ['texto', 'texto', 'Texto literal de la opción'],
+    ['dimension', 'texto', 'Código de Dimensiones al que apunta la opción (clave de la hoja oculta "Claves")'],
+    ['puntos', 'decimal', 'Puntos de la opción (Liderazgo: +2/+1/−1/−2 según Claves!L:O)']
+  ]},
+  Interpretaciones: { pk: 'id_interpretacion', grupo: 'Evaluaciones', cols: [
+    ['id_interpretacion', 'texto', 'PK'],
+    ['id_evaluacion', 'texto', 'FK → Evaluaciones'],
+    ['tipo', 'texto', 'DIMENSION | BANDA | GUIA'],
+    ['codigo', 'texto', 'Dimensión o banda (ALTA, MEDIA, BAJA, MUY_BAJA, REFLEXION, EMPATE)'],
+    ['umbral_min', 'decimal', 'Solo BANDA: puntaje mínimo de la banda'],
+    ['texto', 'texto', 'Texto literal del libro que alimenta la conclusión automática']
+  ]},
+  Matrices_Columnas: { pk: null, grupo: 'Evaluaciones', cols: [
+    ['id_evaluacion', 'texto', 'FK → Evaluaciones (tipo MATRIZ)'],
+    ['orden', 'entero', ''],
+    ['clave', 'texto', 'Nombre técnico de la columna'],
+    ['etiqueta', 'texto', 'Encabezado literal del libro'],
+    ['tipo', 'texto', 'texto | lista | fijo (solo lectura)'],
+    ['opciones', 'texto', 'Valores de la lista separados por |'],
+    ['autofuente', 'texto', 'Autollenado de la fila "Yo": T02.principal, T03.principal, T04.parte1, T04.parte2, T06.principal, T06.secundario']
+  ]},
+  Matrices_Filas_Fijas: { pk: null, grupo: 'Evaluaciones', cols: [
+    ['id_evaluacion', 'texto', 'FK → Evaluaciones'],
+    ['orden', 'entero', ''],
+    ['valor', 'texto', 'Fila fija (Estatus/Certeza/…; etapas de la Curva del cambio)'],
+    ['referencia', 'texto', 'Ejemplos de referencia del libro (SCARF)']
+  ]},
+
+  // ── RESULTADOS ────────────────────────────────────────────────────────────
+  Intentos: { pk: 'id_intento', grupo: 'Resultados', cols: [
+    ['id_intento', 'texto', 'PK'],
+    ['id_usuario', 'texto', 'FK → Usuarios'],
+    ['id_evaluacion', 'texto', 'FK → Evaluaciones'],
+    ['version_eval', 'entero', 'Versión de la evaluación al responder'],
+    ['fecha', 'fecha', 'Inicio!B9 "Fecha"'],
+    ['vigente', 'bool', 'TRUE = el resultado vigente del usuario en esa evaluación'],
+    ['principal', 'texto', 'Resultado principal (canal, factor, estilo, rol, área más baja…)'],
+    ['secundario', 'texto', 'Resultado secundario o 2.º metaprograma'],
+    ['resultado_json', 'json', '{claves, extras, puntajes, filas} calculados por el motor. claves → autollenado de matrices y analítica (parte1, adaptabilidad…); filas → tabla "Mi Perfil"'],
+    ['conclusion', 'texto', 'Conclusión automática (textos del libro + resultado)'],
+    ['respuestas_json', 'json', '{id_pregunta: respuesta}. Permite recalcular si cambia una clave']
+  ]},
+  Puntajes: { pk: null, grupo: 'Resultados', nota: 'Tabla analítica en formato largo para Looker Studio / tablas dinámicas; la app lee los puntajes desde Intentos.resultado_json', cols: [
+    ['id_intento', 'texto', 'FK → Intentos'],
+    ['id_usuario', 'texto', 'Desnormalizado para agregaciones rápidas'],
+    ['id_evaluacion', 'texto', 'Desnormalizado'],
+    ['codigo', 'texto', 'Código de Dimensiones'],
+    ['valor', 'decimal', 'Puntaje (promedio, conteo o suma según el motor)'],
+    ['pct', 'decimal', 'Proporción 0–1 (la fórmula % de cada hoja)']
+  ]},
+  Matrices_Datos: { pk: 'id_dato', grupo: 'Resultados', cols: [
+    ['id_dato', 'texto', 'PK'],
+    ['id_evaluacion', 'texto', 'FK → Evaluaciones (tipo MATRIZ)'],
+    ['id_usuario', 'texto', 'FK → Usuarios'],
+    ['fila', 'entero', 'Posición de la fila (0 = campo extra)'],
+    ['datos_json', 'json', '{clave_columna: valor}'],
+    ['actualizado_en', 'fecha', '']
+  ]},
+
+  // ── AUDITORÍA ─────────────────────────────────────────────────────────────
+  Bitacora: { pk: 'id_log', grupo: 'Auditoría', cols: [
+    ['id_log', 'texto', 'PK'],
+    ['fecha', 'fecha', ''],
+    ['id_usuario', 'texto', 'Quien ejecutó la acción'],
+    ['accion', 'texto', 'LOGIN_FALLIDO, USUARIO_CREADO, CLAVE_RESTABLECIDA, EVAL_PUBLICADA…'],
+    ['detalle', 'texto', '']
+  ]}
+};
+
+/**
+ * Motor.gs — Motor de puntaje y validación. JavaScript puro, sin dependencias de Apps Script
+ * (se ejecuta igual en el servidor, en Node para pruebas y en el preview del navegador).
+ *
+ * Reproduce, motor por motor, las fórmulas del libro "Modulo1_Tests_y_Matrices_OMR.xlsx":
+ *   ESCALA_AREAS     → 1. Rueda de la Vida      (promedio por área; área más baja / más alta)
+ *   MARCAS_EXACTAS   → 2. Test VAK              (20 marcas; conteo por canal; % = marcas × 5)
+ *   ESCALA_FACTORES  → 3. Factores Motivacionales (suma /30 por factor; desempate L > P > F)
+ *   ELECCION_BINARIA → 4. Metaprogramas         (A/B; puntos /8 por polo; empate = Equilibrado)
+ *   SITUACIONAL      → 5. Estilos de Liderazgo  (cuadrante por letra; adaptabilidad = Σ puntos)
+ *   ESCALA_DISCRETA  → 6. Roles de Equipo       (1/3/6/9; 3 ítems por rol; orientación natural)
+ *
+ * Entrada `def`:  { evaluacion:{motor, escala, config}, dimensiones[], preguntas[{id_pregunta, dimension, opciones[]}], interpretaciones[] }
+ * Entrada `resp`: { id_pregunta: valor }   (número, "x"/1, "A"/"B" o "a".."d" según el motor)
+ */
+var Motor = (function () {
+  'use strict';
+
+  var MOTORES = ['ESCALA_AREAS', 'MARCAS_EXACTAS', 'ESCALA_FACTORES', 'ELECCION_BINARIA', 'SITUACIONAL', 'ESCALA_DISCRETA', 'MATRIZ'];
+
+  // ───────────── utilidades ─────────────
+  function num(v) { var n = Number(v); return (v === null || v === undefined || v === '' || isNaN(n)) ? null : n; }
+  function r4(n) { return Math.round(n * 10000) / 10000; }
+  function suma(a) { return a.reduce(function (s, x) { return s + x; }, 0); }
+  function porOrden(a) { return a.slice().sort(function (x, y) { return (x.orden || 0) - (y.orden || 0); }); }
+  function pctTxt(p) { return Math.round(p * 100) + '%'; }
+  function signo(n) { return n > 0 ? '+' + n : String(n); }
+
+  function textoInterp(def, tipo, codigo) {
+    var it = (def.interpretaciones || []).filter(function (i) { return i.tipo === tipo && i.codigo === codigo; })[0];
+    return it ? it.texto : '';
+  }
+  function dimPorCodigo(def, codigo) {
+    return def.dimensiones.filter(function (d) { return d.codigo === codigo; })[0];
+  }
+  /** Ordena por valor + desempate (descendente), tal como hacen las columnas auxiliares "+0.04…" del libro. */
+  function ranking(puntajes, def) {
+    return puntajes.map(function (p) {
+      var d = dimPorCodigo(def, p.codigo);
+      return { p: p, clave: p.valor + ((d && d.desempate) || 0) };
+    }).sort(function (a, b) { return b.clave - a.clave; }).map(function (x) { return x.p; });
+  }
+  function base(def) {
+    return { motor: def.evaluacion.motor, completo: false, mensaje: '', puntajes: [], principal: '', secundario: '',
+             claves: {}, extras: {}, filas: [], conclusion: '' };
+  }
+  function puntaje(d, valor, pct, n) { return { codigo: d.codigo, nombre: d.nombre, grupo: d.grupo || null, valor: r4(valor), pct: r4(pct), n: n }; }
+
+  // ───────────── motores ─────────────
+  var HANDLERS = {
+
+    /* 1 · Rueda de la Vida — promedio por área; las no aplicables se dejan en blanco */
+    ESCALA_AREAS: function (def, resp) {
+      var r = base(def), esc = def.evaluacion.escala, vacias = 0;
+      porOrden(def.dimensiones).forEach(function (d) {
+        var vals = [];
+        def.preguntas.forEach(function (q) {
+          if (q.dimension !== d.codigo) return;
+          var v = num(resp[q.id_pregunta]);
+          if (v !== null && v >= esc.min && v <= esc.max) vals.push(v);
+        });
+        if (!vals.length) vacias++;
+        var prom = vals.length ? suma(vals) / vals.length : 0;
+        r.puntajes.push(puntaje(d, prom, prom / esc.max, vals.length));
+      });
+      r.completo = vacias === 0;
+      if (!r.completo) { r.mensaje = 'Completa las ' + r.puntajes.length + ' áreas (responde al menos una afirmación en cada una)'; return r; }
+      var vals = r.puntajes.map(function (p) { return p.valor; });
+      var general = suma(vals) / vals.length;
+      var baja = r.puntajes[vals.indexOf(Math.min.apply(null, vals))];
+      var alta = r.puntajes[vals.indexOf(Math.max.apply(null, vals))];
+      r.principal = baja.nombre;                                   // "Área más baja" (Mi Perfil!C6)
+      r.claves = { mas_baja: baja.nombre, mas_alta: alta.nombre, promedio: r4(general) };
+      r.filas = [{ titulo: 'Rueda de la Vida', resultado: baja.nombre + ' (área más baja)',
+                   detalle: 'Promedio general: ' + general.toFixed(1) + ' · Área más alta: ' + alta.nombre }];
+      r.conclusion = 'Tu promedio general es ' + general.toFixed(1) + ' sobre ' + esc.max + '. Tu área más baja es ' + baja.nombre +
+        ' y la más alta, ' + alta.nombre + '. ' + textoInterp(def, 'GUIA', 'REFLEXION');
+      return r;
+    },
+
+    /* 2 · VAK — exactamente N palabras marcadas */
+    MARCAS_EXACTAS: function (def, resp) {
+      var r = base(def), N = def.evaluacion.config.marcas, total = 0, cuentas = {};
+      def.preguntas.forEach(function (q) {
+        var m = resp[q.id_pregunta];
+        if (m === 1 || m === true || String(m).toLowerCase() === 'x') { total++; cuentas[q.dimension] = (cuentas[q.dimension] || 0) + 1; }
+      });
+      porOrden(def.dimensiones).forEach(function (d) { var c = cuentas[d.codigo] || 0; r.puntajes.push(puntaje(d, c, c / N, c)); });
+      r.completo = total === N;
+      if (!r.completo) { r.mensaje = 'Marcaste ' + total + ' palabras: deben ser ' + N; return r; }
+      var max = Math.max.apply(null, r.puntajes.map(function (p) { return p.valor; }));
+      var top = r.puntajes.filter(function (p) { return p.valor === max; });
+      r.principal = top[0].nombre; r.secundario = top.length > 1 ? top[1].nombre : '';
+      r.claves = { empate: top.length > 1 };
+      r.filas = [{ titulo: 'Sistema representacional (VAK)', resultado: r.principal,
+                   detalle: r.puntajes.map(function (p) { return p.codigo + ' ' + pctTxt(p.pct); }).join(' · ') }];
+      r.conclusion = top.map(function (p) { return textoInterp(def, 'DIMENSION', p.codigo); }).join(' ') +
+        (top.length > 1 ? ' ' + textoInterp(def, 'GUIA', 'EMPATE') : '');
+      return r;
+    },
+
+    /* 3 · Factores motivacionales — suma por factor, tope 30 */
+    ESCALA_FACTORES: function (def, resp) {
+      var r = base(def), esc = def.evaluacion.escala, tope = def.evaluacion.config.max_por_factor, sumas = {}, resp_n = 0;
+      def.preguntas.forEach(function (q) {
+        var v = num(resp[q.id_pregunta]);
+        if (v !== null && v >= esc.min && v <= esc.max) { resp_n++; sumas[q.dimension] = (sumas[q.dimension] || 0) + v; }
+      });
+      porOrden(def.dimensiones).forEach(function (d) { var s = sumas[d.codigo] || 0; r.puntajes.push(puntaje(d, s, s / tope, 0)); });
+      r.completo = resp_n === def.preguntas.length;
+      if (!r.completo) { r.mensaje = 'Responde las ' + def.preguntas.length + ' afirmaciones (faltan ' + (def.preguntas.length - resp_n) + ')'; return r; }
+      var rk = ranking(r.puntajes, def);
+      r.principal = rk[0].nombre; r.secundario = rk[1].nombre;
+      r.claves = { principal: rk[0].codigo, secundario: rk[1].codigo };
+      r.filas = [{ titulo: 'Factor motivacional', resultado: r.principal, detalle: 'Secundario: ' + r.secundario }];
+      r.conclusion = 'Cómo motivarte: ' + textoInterp(def, 'DIMENSION', rk[0].codigo);
+      return r;
+    },
+
+    /* 4 · Metaprogramas — A/B, dos partes (grupos de dimensiones) */
+    ELECCION_BINARIA: function (def, resp) {
+      var r = base(def), cuentas = {}, contestadas = 0, grupos = [], tot = {};
+      def.preguntas.forEach(function (q) {
+        var L = String(resp[q.id_pregunta] || '').toUpperCase();
+        var op = (q.opciones || []).filter(function (o) { return String(o.letra).toUpperCase() === L; })[0];
+        var g = dimPorCodigo(def, q.opciones[0].dimension).grupo;
+        tot[g] = (tot[g] || 0) + 1;
+        if (op) { contestadas++; cuentas[op.dimension] = (cuentas[op.dimension] || 0) + 1; }
+      });
+      porOrden(def.dimensiones).forEach(function (d) {
+        var c = cuentas[d.codigo] || 0;
+        r.puntajes.push(puntaje(d, c, c / (tot[d.grupo] || 1), c));
+        if (grupos.indexOf(d.grupo) < 0) grupos.push(d.grupo);
+      });
+      r.completo = contestadas === def.preguntas.length;
+      if (!r.completo) { r.mensaje = 'Responde las ' + def.preguntas.length + ' elecciones (faltan ' + (def.preguntas.length - contestadas) + ')'; return r; }
+      var textos = [], partes = [];
+      grupos.forEach(function (g, i) {
+        var ps = r.puntajes.filter(function (p) { return p.grupo === g; });
+        var res = ps[0].valor > ps[1].valor ? ps[0] : (ps[1].valor > ps[0].valor ? ps[1] : null);   // empate = Equilibrado
+        var nombre = res ? res.nombre : 'Equilibrado';
+        if (res) textos.push(textoInterp(def, 'DIMENSION', res.codigo));
+        r.claves['parte' + (i + 1)] = nombre;
+        partes.push({ grupo: g, resultado: nombre });
+        r.filas.push({ titulo: 'Metaprograma ' + (i + 1) + ' (' + g + ')', resultado: nombre,
+                       detalle: ps.map(function (p) { return p.nombre + ' ' + p.valor; }).join(' · ') });
+      });
+      r.extras = { partes: partes };
+      r.principal = r.claves.parte1; r.secundario = r.claves.parte2 || '';
+      r.conclusion = 'Cómo comunicarte conmigo: ' + (textos.join(' ') || 'tus preferencias están equilibradas; adapta el estilo a cada conversación.');
+      return r;
+    },
+
+    /* 5 · Estilos de liderazgo — letra → cuadrante (clave oculta) + puntos de adaptabilidad */
+    SITUACIONAL: function (def, resp) {
+      var r = base(def), cuentas = {}, adapt = 0, contestadas = 0;
+      def.preguntas.forEach(function (q) {
+        var L = String(resp[q.id_pregunta] || '').toLowerCase();
+        var op = (q.opciones || []).filter(function (o) { return String(o.letra).toLowerCase() === L; })[0];
+        if (op) { contestadas++; cuentas[op.dimension] = (cuentas[op.dimension] || 0) + 1; adapt += Number(op.puntos) || 0; }
+      });
+      var N = def.preguntas.length;
+      porOrden(def.dimensiones).forEach(function (d) { var c = cuentas[d.codigo] || 0; r.puntajes.push(puntaje(d, c, c / N, c)); });
+      r.completo = contestadas === N;
+      if (!r.completo) { r.mensaje = 'Responde las ' + N + ' situaciones (faltan ' + (N - contestadas) + ')'; return r; }
+      var rk = ranking(r.puntajes, def);
+      var bandas = (def.interpretaciones || []).filter(function (i) { return i.tipo === 'BANDA'; })
+        .sort(function (a, b) { return b.umbral_min - a.umbral_min; });
+      var banda = bandas.filter(function (b) { return adapt >= b.umbral_min; })[0] || bandas[bandas.length - 1];
+      r.principal = rk[0].nombre; r.secundario = rk[1].nombre;
+      r.claves = { adaptabilidad: adapt, banda: banda ? banda.codigo : '' };
+      r.extras = { rango: def.evaluacion.config.rango_adaptabilidad || null, banda_texto: banda ? banda.texto : '',
+                   bandas: bandas.map(function (b) { return { codigo: b.codigo, umbral_min: b.umbral_min, texto: b.texto }; }).reverse() };
+      r.filas = [{ titulo: 'Estilo de liderazgo', resultado: r.principal,
+                   detalle: 'Apoyo: ' + r.secundario + ' · Adaptabilidad: ' + signo(adapt) }];
+      r.conclusion = 'Adaptabilidad ' + signo(adapt) + ' — ' + (banda ? banda.texto : '');
+      return r;
+    },
+
+    /* 6 · Roles de equipo — 3 ítems por rol, valores 1/3/6/9, orientación natural */
+    ESCALA_DISCRETA: function (def, resp) {
+      var r = base(def), valid = def.evaluacion.escala.valores, tope = def.evaluacion.config.max_por_rol, sumas = {}, n = 0;
+      def.preguntas.forEach(function (q) {
+        var v = num(resp[q.id_pregunta]);
+        if (v !== null && valid.indexOf(v) >= 0) { n++; sumas[q.dimension] = (sumas[q.dimension] || 0) + v; }
+      });
+      porOrden(def.dimensiones).forEach(function (d) { var s = sumas[d.codigo] || 0; r.puntajes.push(puntaje(d, s, s / tope, 0)); });
+      r.completo = n === def.preguntas.length;
+      if (!r.completo) { r.mensaje = 'Responde las ' + def.preguntas.length + ' afirmaciones (faltan ' + (def.preguntas.length - n) + ')'; return r; }
+      var total = suma(r.puntajes.map(function (p) { return p.valor; }));
+      var ori = (def.evaluacion.config.orientaciones || []).map(function (o) {
+        var v = suma(r.puntajes.filter(function (p) { return p.grupo === o.grupo; }).map(function (p) { return p.valor; }));
+        return { grupo: o.grupo, etiqueta: o.etiqueta, valor: v, pct: total ? r4(v / total) : 0 };
+      });
+      var maxO = Math.max.apply(null, ori.map(function (o) { return o.valor; }));
+      var predominante = ori.filter(function (o) { return o.valor === maxO; })[0];   // primero en el orden del libro
+      var rk = ranking(r.puntajes, def);
+      r.principal = rk[0].nombre; r.secundario = rk[1].nombre;
+      r.claves = { orientacion: predominante.etiqueta };
+      r.extras = { orientaciones: ori };
+      r.filas = [{ titulo: 'Rol de equipo', resultado: r.principal,
+                   detalle: 'Segundo rol: ' + r.secundario + ' · ' + predominante.etiqueta }];
+      r.conclusion = 'Rol principal: ' + r.principal + '. Segundo rol: ' + r.secundario + '. ' + predominante.etiqueta + ' (' + pctTxt(predominante.pct) + ' de tu puntaje).';
+      return r;
+    }
+  };
+
+  function calcular(def, resp) {
+    var h = HANDLERS[def.evaluacion.motor];
+    if (!h) throw new Error('Motor desconocido: ' + def.evaluacion.motor);
+    return h(def, resp || {});
+  }
+
+  /** Valida una definición de evaluación (importación de JSON o publicación). Devuelve lista de errores. */
+  function validarDefinicion(d) {
+    var e = [];
+    if (!d || typeof d !== 'object') return ['La definición no es un objeto JSON'];
+    if (!/^[A-Z][A-Z0-9]{1,5}$/.test(d.codigo || '')) e.push('codigo: usa 2–6 caracteres en mayúsculas, p. ej. T07');
+    if (['TEST', 'MATRIZ'].indexOf(d.tipo) < 0) e.push('tipo debe ser TEST o MATRIZ');
+    if (MOTORES.indexOf(d.motor) < 0) e.push('motor desconocido: ' + d.motor);
+    if (!d.nombre) e.push('nombre es obligatorio');
+    if (d.tipo === 'MATRIZ') {
+      if (!d.columnas || !d.columnas.length) e.push('La matriz necesita al menos una columna');
+      (d.columnas || []).forEach(function (c, i) {
+        if (!c.clave || !c.etiqueta) e.push('columnas[' + i + ']: clave y etiqueta son obligatorias');
+        if (['texto', 'lista', 'fijo'].indexOf(c.tipo) < 0) e.push('columnas[' + i + ']: tipo inválido');
+        if (c.tipo === 'lista' && !(c.opciones && c.opciones.length)) e.push('columnas[' + i + ']: la lista necesita opciones');
+      });
+      return e;
+    }
+    var dims = {}; (d.dimensiones || []).forEach(function (x) { if (dims[x.codigo]) e.push('dimensión repetida: ' + x.codigo); dims[x.codigo] = 1; });
+    if (!d.dimensiones || !d.dimensiones.length) e.push('Faltan dimensiones');
+    if (!d.preguntas || !d.preguntas.length) { e.push('Faltan preguntas'); return e; }
+    var conOpciones = d.motor === 'ELECCION_BINARIA' || d.motor === 'SITUACIONAL';
+    d.preguntas.forEach(function (q, i) {
+      var t = 'preguntas[' + i + ']';
+      if (!q.texto) e.push(t + ': texto vacío');
+      if (conOpciones) {
+        if (!q.opciones || q.opciones.length < 2) e.push(t + ': necesita ≥ 2 opciones');
+        var L = {};
+        (q.opciones || []).forEach(function (o) {
+          if (!dims[o.dimension]) e.push(t + ': opción ' + o.letra + ' apunta a una dimensión inexistente (' + o.dimension + ')');
+          if (L[String(o.letra).toLowerCase()]) e.push(t + ': letra repetida ' + o.letra);
+          L[String(o.letra).toLowerCase()] = 1;
+        });
+      } else if (!dims[q.dimension]) e.push(t + ': dimensión inexistente (' + q.dimension + ')');
+    });
+    var esc = d.escala || {}, cfg = d.config || {};
+    if ((d.motor === 'ESCALA_AREAS' || d.motor === 'ESCALA_FACTORES') && !(esc.min < esc.max)) e.push('escala.min debe ser menor que escala.max');
+    if (d.motor === 'ESCALA_DISCRETA' && !(esc.valores && esc.valores.length)) e.push('escala.valores es obligatorio');
+    if (d.motor === 'ESCALA_DISCRETA' && !(cfg.orientaciones && cfg.orientaciones.length && cfg.max_por_rol)) e.push('config.orientaciones y config.max_por_rol son obligatorios');
+    if (d.motor === 'ESCALA_FACTORES' && !cfg.max_por_factor) e.push('config.max_por_factor es obligatorio');
+    if (d.motor === 'MARCAS_EXACTAS' && !(cfg.marcas > 0 && cfg.marcas <= d.preguntas.length)) e.push('config.marcas debe estar entre 1 y el total de preguntas');
+    if (d.motor === 'SITUACIONAL' && !(d.interpretaciones || []).some(function (i) { return i.tipo === 'BANDA'; })) e.push('Faltan bandas de adaptabilidad (interpretaciones tipo BANDA)');
+    if (d.motor === 'ELECCION_BINARIA') {
+      var grupos = {}; (d.dimensiones || []).forEach(function (x) { grupos[x.grupo] = (grupos[x.grupo] || 0) + 1; });
+      Object.keys(grupos).forEach(function (g) { if (grupos[g] !== 2) e.push('Metaprogramas: el grupo "' + g + '" debe tener exactamente 2 dimensiones'); });
+    }
+    return e;
+  }
+
+  return { MOTORES: MOTORES, calcular: calcular, validarDefinicion: validarDefinicion };
+})();
+
+/** db_mem.js — Implementación en memoria de la interfaz `Db` (pruebas en Node y preview en navegador). */
+var Db = (function () {
+  var tablas = {}, cache = {};
+  Object.keys(ESQUEMA).forEach(function (t) { tablas[t] = []; });
+  var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+  var rnd = function () {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) { try { return crypto.randomUUID(); } catch (e) {} }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) { var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); });
+  };
+  return {
+    all: function (t) { return clone(tablas[t]); },
+    insert: function (t, rows) { rows.forEach(function (r) { var o = {}; ESQUEMA[t].cols.forEach(function (c) { o[c[0]] = r[c[0]] === undefined ? (c[1] === 'bool' ? false : c[1] === 'entero' || c[1] === 'decimal' ? 0 : '') : r[c[0]]; }); tablas[t].push(clone(o)); }); },
+    updateWhere: function (t, pred, patch) { var n = 0; tablas[t].forEach(function (r) { if (pred(clone(r))) { Object.assign(r, patch); n++; } }); return n; },
+    removeWhere: function (t, pred) { var a = tablas[t].length; tablas[t] = tablas[t].filter(function (r) { return !pred(clone(r)); }); return a - tablas[t].length; },
+    cacheGet: function (k) { var c = cache[k]; return c && c.exp > Date.now() ? c.v : null; },
+    cachePut: function (k, v, ttl) { cache[k] = { v: v, exp: Date.now() + (ttl || 600) * 1000 }; },
+    cacheDel: function (k) { delete cache[k]; },
+    lock: function (fn) { return fn(); },
+    uuid: rnd,
+    _tablas: tablas, _cache: cache
+  };
+})();
+
+/**
+ * Api.gs — Lógica de negocio. Independiente de la plataforma: todo acceso a datos pasa por el objeto `Db`
+ * (Db.gs → Google Sheets; en pruebas/preview → memoria). Único punto de entrada desde el navegador:
+ *     google.script.run.api(token, accion, payload)   →   { ok, data } | { ok:false, error }
+ *
+ * Seguridad: la Web App se publica "Ejecutar como: yo". El control de acceso es propio (clave + token en
+ * CacheService). Cada llamada revalida que la cuenta siga Activa, así que deshabilitar a un usuario surte efecto al instante.
+ */
+var Api = (function () {
+  'use strict';
+
+  var TTL_SESION = 6 * 3600;           // segundos
+  var MAX_INTENTOS_LOGIN = 5;
+  var ROLES = ['Administrador', 'Colaborador'];
+  var TRANSICIONES = { 'Borrador': ['Habilitada'], 'Habilitada': ['Publicada', 'Borrador'], 'Publicada': ['Habilitada'] };
+  var SOLO_ADMIN = {
+    dashboard: 1, perfilDe: 1, usuariosList: 1, usuarioGuardar: 1, usuarioEstado: 1, usuarioClave: 1,
+    catalogoGuardar: 1, catalogoEstado: 1, evaluacionesAdmin: 1, evaluacionAdminDef: 1, evaluacionEstado: 1,
+    editarTexto: 1, evaluacionImportar: 1, evaluacionExportar: 1, evaluacionEliminar: 1
+  };
+  var EDITABLE = {   // lista blanca de campos de texto editables desde la interfaz
+    Preguntas: ['texto'], Opciones: ['texto'], Interpretaciones: ['texto'],
+    Dimensiones: ['nombre', 'descripcion'], Evaluaciones: ['nombre', 'descripcion', 'instruccion', 'nota']
+  };
+
+  var memo = {};   // caché de lectura por petición
+
+  // ───────────── utilidades ─────────────
+  function ahora() { return new Date().toISOString(); }
+  function pad(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }
+  function err(msg, codigo, detalles) { var e = new Error(msg); e.esApi = true; e.codigo = codigo || 'ERR'; e.detalles = detalles; return e; }
+  function pj(s, def) { try { return s ? JSON.parse(s) : def; } catch (x) { return def; } }
+  function T(t) { if (!memo[t]) memo[t] = Db.all(t); return memo[t]; }
+  function sucio(t) { delete memo[t]; }
+  function txt(v, max) { v = (v === null || v === undefined) ? '' : String(v).trim(); return v.length > (max || 2000) ? v.slice(0, max || 2000) : v; }
+  function primero(arr, f) { for (var i = 0; i < arr.length; i++) if (f(arr[i])) return arr[i]; return null; }
+  function siguienteId(tabla) {
+    var pre = ESQUEMA[tabla].prefijo, pk = ESQUEMA[tabla].pk, w = pre === 'USR' ? 4 : 3, max = 0;
+    T(tabla).forEach(function (r) { var n = parseInt(String(r[pk]).split('-')[1], 10); if (n > max) max = n; });
+    return pre + '-' + pad(max + 1, w);
+  }
+  function azar(len) {       // texto aleatorio sin caracteres ambiguos (clave temporal)
+    var abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789', hex = (Db.uuid() + Db.uuid() + Db.uuid()).replace(/-/g, ''), s = '';
+    for (var i = 0; i < len; i++) s += abc.charAt(parseInt(hex.substr(i * 2, 2), 16) % abc.length);
+    return s;
+  }
+
+  // ───────────── SHA-256 (JS puro, verificado contra Node crypto) ─────────────
+  var K256 = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  function sha256(msg) {
+    var b = unescape(encodeURIComponent(msg)), l = b.length, w = [], i, j, nw = (((l + 8) >> 6) + 1) * 16;
+    for (i = 0; i < nw; i++) w[i] = 0;
+    for (i = 0; i < l; i++) w[i >> 2] |= b.charCodeAt(i) << (24 - (i % 4) * 8);
+    w[l >> 2] |= 0x80 << (24 - (l % 4) * 8);
+    w[(((l + 8) >> 6) + 1) * 16 - 1] = l * 8;
+    var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+    function rr(n, x) { return (x >>> n) | (x << (32 - n)); }
+    for (i = 0; i < w.length; i += 16) {
+      var s = w.slice(i, i + 16), a = H.slice(0);
+      for (j = 16; j < 64; j++) {
+        var s0 = rr(7, s[j - 15]) ^ rr(18, s[j - 15]) ^ (s[j - 15] >>> 3), s1 = rr(17, s[j - 2]) ^ rr(19, s[j - 2]) ^ (s[j - 2] >>> 10);
+        s[j] = (s[j - 16] + s0 + s[j - 7] + s1) | 0;
+      }
+      for (j = 0; j < 64; j++) {
+        var S1 = rr(6, a[4]) ^ rr(11, a[4]) ^ rr(25, a[4]), ch = (a[4] & a[5]) ^ (~a[4] & a[6]);
+        var t1 = (a[7] + S1 + ch + K256[j] + (s[j] | 0)) | 0;
+        var S0 = rr(2, a[0]) ^ rr(13, a[0]) ^ rr(22, a[0]), mj = (a[0] & a[1]) ^ (a[0] & a[2]) ^ (a[1] & a[2]);
+        var t2 = (S0 + mj) | 0;
+        a = [(t1 + t2) | 0, a[0], a[1], a[2], (a[3] + t1) | 0, a[4], a[5], a[6]];
+      }
+      for (j = 0; j < 8; j++) H[j] = (H[j] + a[j]) | 0;
+    }
+    return H.map(function (x) { return ('00000000' + (x >>> 0).toString(16)).slice(-8); }).join('');
+  }
+  function hashClave(clave, salt) {           // cadena de 1 500 rondas con sal (endurece la fuerza bruta)
+    var h = sha256(salt + ':' + clave);
+    for (var i = 0; i < 1500; i++) h = sha256(h + salt + clave);
+    return h;
+  }
+  function fijarClave(u, clave, debeCambiar) {
+    var salt = azar(16);
+    Db.updateWhere('Usuarios', function (r) { return r.id_usuario === u.id_usuario; },
+      { clave_salt: salt, clave_hash: hashClave(clave, salt), debe_cambiar_clave: !!debeCambiar });
+    sucio('Usuarios');
+  }
+  function validarClave(clave, usuario) {
+    if (!clave || clave.length < 8) throw err('La clave debe tener al menos 8 caracteres');
+    if (!/[A-Za-z]/.test(clave) || !/[0-9]/.test(clave)) throw err('La clave debe combinar letras y números');
+    if (String(clave).toLowerCase() === String(usuario || '').toLowerCase()) throw err('La clave no puede ser igual al usuario');
+  }
+
+  // ───────────── sesión ─────────────
+  function seguro(u) {
+    var suc = primero(T('Sucursales'), function (s) { return s.id_sucursal === u.id_sucursal; });
+    var are = primero(T('Areas'), function (a) { return a.id_area === u.id_area; });
+    return { id_usuario: u.id_usuario, usuario: u.usuario, nombre: u.nombre, cargo: u.cargo, id_sucursal: u.id_sucursal,
+             sucursal: suc ? suc.nombre : '', id_area: u.id_area, area: are ? are.nombre : '', rol: u.rol, estado: u.estado,
+             debe_cambiar_clave: !!u.debe_cambiar_clave, ultimo_acceso: u.ultimo_acceso };
+  }
+  function catalogos() {
+    var f = function (r) { return r.activo; };
+    return { sucursales: T('Sucursales').filter(f), areas: T('Areas').filter(f) };
+  }
+  function log(ctx, accion, detalle) {
+    Db.insert('Bitacora', [{ id_log: 'LOG-' + Db.uuid().slice(0, 8), fecha: ahora(), id_usuario: ctx ? ctx.usuario.id_usuario : '', accion: accion, detalle: txt(detalle, 500) }]);
+  }
+  function sesion(token) {
+    var s = token ? Db.cacheGet('ses:' + token) : null;
+    if (!s) throw err('Tu sesión expiró. Vuelve a ingresar.', '401');
+    s = JSON.parse(s);
+    var u = primero(T('Usuarios'), function (r) { return r.id_usuario === s.id_usuario; });
+    if (!u || u.estado !== 'Activo') { Db.cacheDel('ses:' + token); throw err('Tu cuenta está deshabilitada. Contacta a Talento Humano.', '401'); }
+    Db.cachePut('ses:' + token, JSON.stringify(s), TTL_SESION);   // sesión deslizante
+    return { token: token, usuario: u };
+  }
+
+  // ───────────── definiciones de evaluación ─────────────
+  function cargarEval(id) {
+    var ev = primero(T('Evaluaciones'), function (e) { return e.id_evaluacion === id; });
+    if (!ev) throw err('La evaluación no existe');
+    return ev;
+  }
+  /** Carga la definición completa (con claves). Se cachea por id+versión: editar cualquier texto incrementa la versión. */
+  function cargarDef(id) {
+    var ev = cargarEval(id), ck = 'def:' + id + ':' + ev.version, c = Db.cacheGet(ck);
+    if (c) return JSON.parse(c);
+    var def = { evaluacion: Object.assign({}, ev, { escala: pj(ev.escala_json, {}), config: pj(ev.config_json, {}) }),
+                dimensiones: [], preguntas: [], interpretaciones: [], columnas: [], fijas: [] };
+    def.dimensiones = T('Dimensiones').filter(function (d) { return d.id_evaluacion === id; }).sort(function (a, b) { return a.orden - b.orden; });
+    var qs = T('Preguntas').filter(function (q) { return q.id_evaluacion === id && q.activa; }).sort(function (a, b) { return a.orden - b.orden; });
+    var ops = {}; var ids = {}; qs.forEach(function (q) { ids[q.id_pregunta] = 1; q.opciones = []; ops[q.id_pregunta] = q; });
+    T('Opciones').forEach(function (o) { if (ids[o.id_pregunta]) ops[o.id_pregunta].opciones.push(o); });
+    def.preguntas = qs;
+    def.interpretaciones = T('Interpretaciones').filter(function (i) { return i.id_evaluacion === id; });
+    def.columnas = T('Matrices_Columnas').filter(function (c) { return c.id_evaluacion === id; }).sort(function (a, b) { return a.orden - b.orden; })
+      .map(function (c) { return Object.assign({}, c, { opciones: c.opciones ? String(c.opciones).split('|') : null }); });
+    def.fijas = T('Matrices_Filas_Fijas').filter(function (f) { return f.id_evaluacion === id; }).sort(function (a, b) { return a.orden - b.orden; });
+    try { Db.cachePut(ck, JSON.stringify(def), 21600); } catch (x) { /* >100 KB: sin caché */ }
+    return def;
+  }
+  /** Versión para el cliente: sin dimensión/puntos (la clave de puntaje no sale del servidor). */
+  function defPublica(def) {
+    var e = def.evaluacion;
+    return {
+      evaluacion: { id_evaluacion: e.id_evaluacion, codigo: e.codigo, tipo: e.tipo, motor: e.motor, nombre: e.nombre,
+                    instruccion: e.instruccion, nota: e.nota, escala: e.escala, version: e.version,
+                    config: { marcas: e.config.marcas, rango_adaptabilidad: e.config.rango_adaptabilidad } },
+      preguntas: def.preguntas.map(function (q) {
+        return { id_pregunta: q.id_pregunta, numero: q.numero, seccion: q.seccion || '', texto: q.texto,
+                 opciones: (q.opciones || []).map(function (o) { return { letra: o.letra, texto: o.texto }; }) };
+      })
+    };
+  }
+  function formatoImport(def, conIds) {  // misma forma que Seed.gs / importación JSON (conIds: añade ids para el editor)
+    var e = def.evaluacion, o = { codigo: e.codigo, orden: e.orden, tipo: e.tipo, motor: e.motor, nombre: e.nombre, descripcion: e.descripcion,
+      instruccion: e.instruccion, escala: e.escala, config: e.config, nota: e.nota || null };
+    o.dimensiones = def.dimensiones.map(function (d) { return { id: conIds ? d.id_dimension : undefined, codigo: d.codigo, nombre: d.nombre, grupo: d.grupo || null, orden: d.orden, desempate: d.desempate, descripcion: d.descripcion || null }; });
+    o.preguntas = def.preguntas.map(function (q) {
+      var r = { id: conIds ? q.id_pregunta : undefined, numero: q.numero, seccion: q.seccion || null, texto: q.texto };
+      if (q.dimension) r.dimension = q.dimension;
+      if (q.opciones && q.opciones.length) r.opciones = q.opciones.map(function (x) { return { id: conIds ? x.id_opcion : undefined, letra: x.letra, texto: x.texto, dimension: x.dimension, puntos: x.puntos }; });
+      return r;
+    });
+    o.interpretaciones = def.interpretaciones.map(function (i) { return { id: conIds ? i.id_interpretacion : undefined, tipo: i.tipo, codigo: i.codigo, umbral_min: i.umbral_min === '' ? null : i.umbral_min, texto: i.texto }; });
+    if (e.tipo === 'MATRIZ') {
+      o.columnas = def.columnas.map(function (c) { return { orden: c.orden, clave: c.clave, etiqueta: c.etiqueta, tipo: c.tipo, opciones: c.opciones, autofuente: c.autofuente || null }; });
+      o.fijas = def.fijas.map(function (f) { return { orden: f.orden, valor: f.valor, referencia: f.referencia || null }; });
+    }
+    return o;
+  }
+  /** Convierte una definición (formato import) en filas de tablas. */
+  function aplanar(d, estado, orden) {
+    var idEv = 'EV-' + d.codigo, t = ahora(), R = { Evaluaciones: [], Dimensiones: [], Preguntas: [], Opciones: [], Interpretaciones: [], Matrices_Columnas: [], Matrices_Filas_Fijas: [] };
+    R.Evaluaciones.push({ id_evaluacion: idEv, codigo: d.codigo, orden: orden || d.orden, tipo: d.tipo, motor: d.motor, nombre: d.nombre,
+      descripcion: d.descripcion || '', instruccion: d.instruccion || '', escala_json: JSON.stringify(d.escala || {}), config_json: JSON.stringify(d.config || {}),
+      nota: d.nota || '', estado: estado, version: 1, publicada_en: estado === 'Publicada' ? t : '', actualizado_en: t });
+    (d.dimensiones || []).forEach(function (x, i) {
+      R.Dimensiones.push({ id_dimension: d.codigo + '-' + x.codigo, id_evaluacion: idEv, codigo: x.codigo, nombre: x.nombre, grupo: x.grupo || '',
+        orden: x.orden || i + 1, desempate: x.desempate || 0, descripcion: x.descripcion || '' });
+    });
+    (d.preguntas || []).forEach(function (q, i) {
+      var idq = d.codigo + '-P' + pad(i + 1, 3);
+      R.Preguntas.push({ id_pregunta: idq, id_evaluacion: idEv, orden: i + 1, numero: q.numero || i + 1, seccion: q.seccion || '', texto: q.texto, dimension: q.dimension || '', activa: true });
+      (q.opciones || []).forEach(function (o) {
+        R.Opciones.push({ id_opcion: idq + '-' + String(o.letra).toLowerCase(), id_pregunta: idq, letra: o.letra, texto: o.texto, dimension: o.dimension, puntos: o.puntos === undefined ? 0 : o.puntos });
+      });
+    });
+    (d.interpretaciones || []).forEach(function (x, i) {
+      R.Interpretaciones.push({ id_interpretacion: d.codigo + '-I' + pad(i + 1, 2), id_evaluacion: idEv, tipo: x.tipo, codigo: x.codigo,
+        umbral_min: x.umbral_min === null || x.umbral_min === undefined ? '' : x.umbral_min, texto: x.texto });
+    });
+    (d.columnas || []).forEach(function (c, i) {
+      R.Matrices_Columnas.push({ id_evaluacion: idEv, orden: c.orden || i + 1, clave: c.clave, etiqueta: c.etiqueta, tipo: c.tipo,
+        opciones: c.opciones ? c.opciones.join('|') : '', autofuente: c.autofuente || '' });
+    });
+    (d.fijas || []).forEach(function (f, i) {
+      R.Matrices_Filas_Fijas.push({ id_evaluacion: idEv, orden: f.orden || i + 1, valor: f.valor, referencia: f.referencia || '' });
+    });
+    return R;
+  }
+  function insertarDef(d, estado, orden) {
+    var R = aplanar(d, estado, orden);
+    Object.keys(R).forEach(function (t) { if (R[t].length) { Db.insert(t, R[t]); sucio(t); } });
+  }
+  function visible(ev, u) { return ev.estado === 'Publicada' || (u.rol === 'Administrador' && ev.estado === 'Habilitada'); }
+
+  // ───────────── resultados ─────────────
+  function intentosVigentes(idUsuario) {
+    return T('Intentos').filter(function (i) { return i.vigente && (!idUsuario || i.id_usuario === idUsuario); });
+  }
+  function presentar(intento, ev) {
+    var r = pj(intento.resultado_json, {});
+    return { id_evaluacion: intento.id_evaluacion, codigo: ev.codigo, nombre: ev.nombre, motor: ev.motor, nota: ev.nota, fecha: intento.fecha,
+             principal: intento.principal, secundario: intento.secundario, conclusion: intento.conclusion,
+             puntajes: r.puntajes || [], claves: r.claves || {}, extras: r.extras || {}, filas: r.filas || [] };
+  }
+  function perfil(idUsuario) {
+    var u = primero(T('Usuarios'), function (x) { return x.id_usuario === idUsuario; });
+    if (!u) throw err('El usuario no existe');
+    var evs = T('Evaluaciones').filter(function (e) { return e.tipo === 'TEST' && e.estado === 'Publicada'; }).sort(function (a, b) { return a.orden - b.orden; });
+    var vig = intentosVigentes(idUsuario), resultados = [], pendientes = [];
+    evs.forEach(function (e) {
+      var i = primero(vig, function (x) { return x.id_evaluacion === e.id_evaluacion; });
+      if (i) resultados.push(presentar(i, e)); else pendientes.push({ id_evaluacion: e.id_evaluacion, nombre: e.nombre });
+    });
+    var plan = primero(T('Evaluaciones'), function (e) { return e.codigo === 'M07'; });
+    var filasPlan = [];
+    if (plan) filasPlan = T('Matrices_Datos').filter(function (r) { return r.id_evaluacion === plan.id_evaluacion && r.id_usuario === idUsuario && r.fila > 0; })
+      .sort(function (a, b) { return a.fila - b.fila; }).map(function (r) { return pj(r.datos_json, {}); });
+    return { usuario: seguro(u), resultados: resultados, pendientes: pendientes, plan: filasPlan };
+  }
+
+  // ───────────── ACCIONES ─────────────
+  var ACCIONES = {
+
+    // — acceso —
+    login: function (p) {
+      var usuario = txt(p.usuario, 60).toLowerCase(), clave = String(p.clave || ''), kf = 'fail:' + usuario;
+      if (parseInt(Db.cacheGet(kf) || '0', 10) >= MAX_INTENTOS_LOGIN) throw err('Demasiados intentos fallidos. Espera 15 minutos.', '429');
+      var u = primero(T('Usuarios'), function (r) { return r.usuario === usuario; });
+      var ok = u && u.estado === 'Activo' && hashClave(clave, u.clave_salt) === u.clave_hash;
+      if (!ok) {
+        Db.cachePut(kf, String(parseInt(Db.cacheGet(kf) || '0', 10) + 1), 900);
+        log(null, 'LOGIN_FALLIDO', usuario);
+        throw err(u && u.estado !== 'Activo' ? 'Tu cuenta está deshabilitada. Contacta a Talento Humano.' : 'Usuario o clave incorrectos.', '401');
+      }
+      Db.cacheDel(kf);
+      var token = Db.uuid() + Db.uuid();
+      Db.cachePut('ses:' + token, JSON.stringify({ id_usuario: u.id_usuario }), TTL_SESION);
+      Db.updateWhere('Usuarios', function (r) { return r.id_usuario === u.id_usuario; }, { ultimo_acceso: ahora() });
+      sucio('Usuarios');
+      return { token: token, usuario: seguro(u), catalogos: catalogos() };
+    },
+    logout: function (p, ctx) { Db.cacheDel('ses:' + ctx.token); return true; },
+    sesion: function (p, ctx) { return { usuario: seguro(ctx.usuario), catalogos: catalogos() }; },
+    cambiarClave: function (p, ctx) {
+      var u = ctx.usuario;
+      if (hashClave(String(p.actual || ''), u.clave_salt) !== u.clave_hash) throw err('La clave actual no es correcta');
+      validarClave(String(p.nueva || ''), u.usuario);
+      fijarClave(u, String(p.nueva), false);
+      return true;
+    },
+
+    // — colaborador —
+    misEvaluaciones: function (p, ctx) {
+      var id = ctx.usuario.id_usuario, vig = intentosVigentes(id), md = T('Matrices_Datos');
+      return T('Evaluaciones').filter(function (e) { return visible(e, ctx.usuario); }).sort(function (a, b) { return a.orden - b.orden; }).map(function (e) {
+        var o = { id_evaluacion: e.id_evaluacion, codigo: e.codigo, tipo: e.tipo, motor: e.motor, nombre: e.nombre, descripcion: e.descripcion, estado: e.estado };
+        if (e.tipo === 'TEST') {
+          var i = primero(vig, function (x) { return x.id_evaluacion === e.id_evaluacion; });
+          o.hecho = !!i; if (i) { o.fecha = i.fecha; o.principal = i.principal; o.secundario = i.secundario; }
+        } else {
+          o.filas = md.filter(function (r) { return r.id_evaluacion === e.id_evaluacion && r.id_usuario === id && r.fila > 0; }).length;
+          o.hecho = o.filas > 0;
+        }
+        return o;
+      });
+    },
+    evaluacionDef: function (p, ctx) {
+      var ev = cargarEval(p.id_evaluacion);
+      if (!visible(ev, ctx.usuario)) throw err('Esta evaluación no está disponible', '403');
+      return defPublica(cargarDef(p.id_evaluacion));
+    },
+    enviarRespuestas: function (p, ctx) {
+      var ev = cargarEval(p.id_evaluacion);
+      if (ev.tipo !== 'TEST' || !visible(ev, ctx.usuario)) throw err('Esta evaluación no está disponible', '403');
+      var def = cargarDef(p.id_evaluacion), resp = p.respuestas || {}, limpio = {};
+      def.preguntas.forEach(function (q) { if (resp[q.id_pregunta] !== undefined && resp[q.id_pregunta] !== null) limpio[q.id_pregunta] = resp[q.id_pregunta]; });
+      var res = Motor.calcular(def, limpio);
+      if (!res.completo) throw err(res.mensaje || 'Faltan respuestas');
+      var idInt = 'INT-' + Db.uuid().slice(0, 8).toUpperCase(), t = ahora(), u = ctx.usuario;
+      Db.lock(function () {
+        Db.updateWhere('Intentos', function (r) { return r.id_usuario === u.id_usuario && r.id_evaluacion === ev.id_evaluacion && r.vigente; }, { vigente: false });
+        Db.insert('Intentos', [{ id_intento: idInt, id_usuario: u.id_usuario, id_evaluacion: ev.id_evaluacion, version_eval: ev.version, fecha: t, vigente: true,
+          principal: res.principal, secundario: res.secundario, conclusion: res.conclusion, respuestas_json: JSON.stringify(limpio),
+          resultado_json: JSON.stringify({ claves: res.claves, extras: res.extras, puntajes: res.puntajes, filas: res.filas }) }]);
+        Db.insert('Puntajes', res.puntajes.map(function (x) { return { id_intento: idInt, id_usuario: u.id_usuario, id_evaluacion: ev.id_evaluacion, codigo: x.codigo, valor: x.valor, pct: x.pct }; }));
+      });
+      sucio('Intentos');
+      return presentar({ id_evaluacion: ev.id_evaluacion, fecha: t, principal: res.principal, secundario: res.secundario, conclusion: res.conclusion,
+        resultado_json: JSON.stringify({ claves: res.claves, extras: res.extras, puntajes: res.puntajes, filas: res.filas }) }, ev);
+    },
+    miResultado: function (p, ctx) {
+      var ev = cargarEval(p.id_evaluacion);
+      var i = primero(intentosVigentes(ctx.usuario.id_usuario), function (x) { return x.id_evaluacion === ev.id_evaluacion; });
+      return i ? presentar(i, ev) : null;
+    },
+    miPerfil: function (p, ctx) { return perfil(ctx.usuario.id_usuario); },
+
+    // — matrices (propias del usuario) —
+    matrizGet: function (p, ctx) {
+      var ev = cargarEval(p.id_evaluacion);
+      if (ev.tipo !== 'MATRIZ' || !visible(ev, ctx.usuario)) throw err('Esta matriz no está disponible', '403');
+      var def = cargarDef(p.id_evaluacion), id = ctx.usuario.id_usuario;
+      var filas = T('Matrices_Datos').filter(function (r) { return r.id_evaluacion === ev.id_evaluacion && r.id_usuario === id; }).sort(function (a, b) { return a.fila - b.fila; });
+      var extra = primero(filas, function (r) { return r.fila === 0; });
+      var cfg = def.evaluacion.config, yo = null;
+      if (cfg.fila_yo) {                              // fila "Yo": se llena sola con los tests (como en el libro)
+        var vig = intentosVigentes(id), porCodigo = {};
+        T('Evaluaciones').forEach(function (e) { var i = primero(vig, function (x) { return x.id_evaluacion === e.id_evaluacion; }); if (i) porCodigo[e.codigo] = i; });
+        yo = {}; yo[def.columnas[0].clave] = ctx.usuario.nombre;
+        def.columnas.forEach(function (c) {
+          if (c.clave === 'relacion' && cfg.relacion_yo) yo[c.clave] = cfg.relacion_yo;
+          if (!c.autofuente) return;
+          var partes = c.autofuente.split('.'), i = porCodigo[partes[0]];
+          if (!i) { yo[c.clave] = ''; return; }
+          yo[c.clave] = (partes[1] === 'principal' || partes[1] === 'secundario') ? i[partes[1]] : (pj(i.resultado_json, {}).claves || {})[partes[1]] || '';
+        });
+      }
+      return { evaluacion: { id_evaluacion: ev.id_evaluacion, codigo: ev.codigo, nombre: ev.nombre, instruccion: ev.instruccion, config: cfg },
+               columnas: def.columnas, fijas: def.fijas,
+               filas: filas.filter(function (r) { return r.fila > 0; }).map(function (r) { return Object.assign({ _fila: r.fila }, pj(r.datos_json, {})); }),
+               extra: extra ? pj(extra.datos_json, {}) : {}, yo: yo };
+    },
+    matrizSave: function (p, ctx) {
+      var ev = cargarEval(p.id_evaluacion);
+      if (ev.tipo !== 'MATRIZ' || !visible(ev, ctx.usuario)) throw err('Esta matriz no está disponible', '403');
+      var def = cargarDef(p.id_evaluacion), cfg = def.evaluacion.config, cols = def.columnas, nuevas = [], t = ahora(), id = ctx.usuario.id_usuario;
+      var filas = Array.isArray(p.filas) ? p.filas : [];
+      if (cfg.max_filas && filas.length > cfg.max_filas + (cfg.fila_yo ? 1 : 0)) throw err('Máximo ' + cfg.max_filas + ' filas en esta matriz');
+      filas.forEach(function (f, idx) {
+        var o = {}, vacia = true;
+        cols.forEach(function (c) {
+          if (c.tipo === 'fijo' || c.autofuente) return;
+          var v = txt(f[c.clave], 2000);
+          if (c.tipo === 'lista' && v && c.opciones.indexOf(v) < 0) throw err('Valor no permitido en "' + c.etiqueta + '"');
+          o[c.clave] = v; if (v) vacia = false;
+        });
+        var pos = (f._fila > 0 && def.fijas.length) ? f._fila : idx + 1;   // matrices con filas fijas conservan su posición
+        if (!vacia || cfg.fila_yo && idx === 0) nuevas.push({ id_dato: 'MD-' + Db.uuid().slice(0, 8), id_evaluacion: ev.id_evaluacion, id_usuario: id, fila: pos, datos_json: JSON.stringify(o), actualizado_en: t });
+      });
+      if (cfg.campo_extra && txt(p.extra && p.extra[cfg.campo_extra.clave])) {
+        var ex = {}; ex[cfg.campo_extra.clave] = txt(p.extra[cfg.campo_extra.clave], 2000);
+        nuevas.push({ id_dato: 'MD-' + Db.uuid().slice(0, 8), id_evaluacion: ev.id_evaluacion, id_usuario: id, fila: 0, datos_json: JSON.stringify(ex), actualizado_en: t });
+      }
+      Db.lock(function () {
+        Db.removeWhere('Matrices_Datos', function (r) { return r.id_evaluacion === ev.id_evaluacion && r.id_usuario === id; });
+        if (nuevas.length) Db.insert('Matrices_Datos', nuevas);
+      });
+      sucio('Matrices_Datos');
+      return { guardadas: nuevas.filter(function (x) { return x.fila > 0; }).length };
+    },
+
+    // — Módulo 1 · Dashboard (admin) —
+    perfilDe: function (p) { return perfil(p.id_usuario); },
+    dashboard: function (p) {
+      var users = T('Usuarios').filter(function (u) {
+        return u.rol === 'Colaborador' && u.estado === 'Activo' && (!p.id_sucursal || u.id_sucursal === p.id_sucursal) && (!p.id_area || u.id_area === p.id_area);
+      });
+      var idsU = {}; users.forEach(function (u) { idsU[u.id_usuario] = u; });
+      var tests = T('Evaluaciones').filter(function (e) { return e.tipo === 'TEST' && e.estado === 'Publicada'; }).sort(function (a, b) { return a.orden - b.orden; });
+      var vig = intentosVigentes().filter(function (i) { return idsU[i.id_usuario]; });
+      var porUsuario = {}; vig.forEach(function (i) { (porUsuario[i.id_usuario] = porUsuario[i.id_usuario] || []).push(i); });
+      var idsT = {}; tests.forEach(function (e) { idsT[e.id_evaluacion] = 1; });
+      var hechosDe = function (uid) { return (porUsuario[uid] || []).filter(function (i) { return idsT[i.id_evaluacion]; }).length; };
+      var conAlguno = users.filter(function (u) { return hechosDe(u.id_usuario) > 0; }).length;
+      var completos = users.filter(function (u) { return tests.length && hechosDe(u.id_usuario) === tests.length; }).length;
+      var out = { kpis: { colaboradores: users.length, conAlgunTest: conAlguno, completos: completos, tests: tests.length,
+                          avance: users.length && tests.length ? vig.filter(function (i) { return idsT[i.id_evaluacion]; }).length / (users.length * tests.length) : 0 },
+                  participacion: [], distribuciones: [], rueda: null, liderazgo: null, porArea: [], porSucursal: [], colaboradores: [] };
+      tests.forEach(function (e) {
+        var def = cargarDef(e.id_evaluacion), ints = vig.filter(function (i) { return i.id_evaluacion === e.id_evaluacion; });
+        out.participacion.push({ id_evaluacion: e.id_evaluacion, codigo: e.codigo, nombre: e.nombre, completados: ints.length, total: users.length, pct: users.length ? ints.length / users.length : 0 });
+        // distribución del resultado principal (y, en Metaprogramas, de cada parte)
+        var esMeta = e.motor === 'ELECCION_BINARIA', esRueda = e.motor === 'ESCALA_AREAS';
+        var grupos = []; def.dimensiones.forEach(function (d) { if (grupos.indexOf(d.grupo) < 0) grupos.push(d.grupo); });
+        (esMeta ? grupos : [null]).forEach(function (g, k) {
+          var cats = def.dimensiones.filter(function (d) { return !esMeta || d.grupo === g; }).map(function (d) { return d.nombre; });
+          if (esMeta) cats.push('Equilibrado');
+          var cuenta = {}; cats.forEach(function (c) { cuenta[c] = 0; });
+          ints.forEach(function (i) {
+            var cl = pj(i.resultado_json, {}).claves || {};
+            var v = esMeta ? cl['parte' + (k + 1)] : esRueda ? cl.mas_baja : i.principal;
+            if (v in cuenta) cuenta[v]++;
+          });
+          out.distribuciones.push({ id_evaluacion: e.id_evaluacion, codigo: e.codigo, motor: e.motor, n: ints.length,
+            titulo: e.nombre + (esMeta ? ' · ' + g : '') + (esRueda ? ' · área más baja' : ''),
+            items: cats.map(function (c) { return { nombre: c, n: cuenta[c], pct: ints.length ? cuenta[c] / ints.length : 0 }; }) });
+        });
+        if (e.motor === 'ESCALA_AREAS' && ints.length) {
+          var acc = {}; def.dimensiones.forEach(function (d) { acc[d.codigo] = 0; });
+          ints.forEach(function (i) { (pj(i.resultado_json, {}).puntajes || []).forEach(function (x) { acc[x.codigo] += x.valor; }); });
+          var areas = def.dimensiones.map(function (d) { return { codigo: d.codigo, nombre: d.nombre, prom: acc[d.codigo] / ints.length }; });
+          out.rueda = { n: ints.length, max: def.evaluacion.escala.max, areas: areas, general: areas.reduce(function (s, a) { return s + a.prom; }, 0) / areas.length };
+        }
+        if (e.motor === 'SITUACIONAL' && ints.length) {
+          var suma = 0, bandas = {};
+          ints.forEach(function (i) { var c = pj(i.resultado_json, {}).claves || {}; suma += c.adaptabilidad || 0; bandas[c.banda] = (bandas[c.banda] || 0) + 1; });
+          var bn = {}; def.interpretaciones.forEach(function (x) { if (x.tipo === 'BANDA') bn[x.codigo] = { cod: x.codigo, texto: x.texto, u: x.umbral_min }; });
+          out.liderazgo = { n: ints.length, promedio: suma / ints.length, rango: def.evaluacion.config.rango_adaptabilidad,
+            bandas: Object.keys(bn).sort(function (a, b) { return bn[b].u - bn[a].u; }).map(function (c) { return { codigo: c, texto: bn[c].texto.split(':')[0], umbral_min: bn[c].u, n: bandas[c] || 0 }; }) };
+        }
+      });
+      var agrupar = function (cat, campo, id, nombre) {
+        return T(cat).filter(function (c) { return c.activo; }).map(function (c) {
+          var us = users.filter(function (u) { return u[campo] === c[id]; });
+          var hechos = us.reduce(function (s, u) { return s + hechosDe(u.id_usuario); }, 0);
+          return { nombre: c[nombre], colaboradores: us.length, avance: us.length && tests.length ? hechos / (us.length * tests.length) : 0 };
+        }).filter(function (x) { return x.colaboradores > 0; });
+      };
+      out.porArea = agrupar('Areas', 'id_area', 'id_area', 'nombre');
+      out.porSucursal = agrupar('Sucursales', 'id_sucursal', 'id_sucursal', 'nombre');
+      out.colaboradores = users.map(function (u) {
+        var s = seguro(u), ult = (porUsuario[u.id_usuario] || []).map(function (i) { return i.fecha; }).sort().pop() || '';
+        return { id_usuario: u.id_usuario, nombre: u.nombre, cargo: u.cargo, sucursal: s.sucursal, area: s.area, hechos: hechosDe(u.id_usuario), total: tests.length, ultimo: ult };
+      }).sort(function (a, b) { return a.nombre.localeCompare(b.nombre); });
+      return out;
+    },
+
+    // — Módulo 3 · Usuarios (admin) —
+    usuariosList: function () { return { usuarios: T('Usuarios').map(seguro), catalogos: catalogos() }; },
+    usuarioGuardar: function (p, ctx) {
+      var nuevo = !p.id_usuario, usuario = txt(p.usuario, 40).toLowerCase(), nombre = txt(p.nombre, 120), rol = p.rol;
+      if (!/^[a-z0-9._-]{3,40}$/.test(usuario)) throw err('Usuario: 3–40 caracteres (letras minúsculas, números, punto, guion)');
+      if (!nombre) throw err('El nombre es obligatorio');
+      if (ROLES.indexOf(rol) < 0) throw err('Rol inválido');
+      if (rol === 'Colaborador' && !primero(T('Sucursales'), function (x) { return x.id_sucursal === p.id_sucursal; })) throw err('Elige una sucursal');
+      if (p.id_area && !primero(T('Areas'), function (a) { return a.id_area === p.id_area; })) throw err('Área inválida');
+      if (primero(T('Usuarios'), function (u) { return u.usuario === usuario && u.id_usuario !== p.id_usuario; })) throw err('Ya existe un usuario con ese nombre de acceso');
+      var campos = { usuario: usuario, nombre: nombre, cargo: txt(p.cargo, 120), id_sucursal: p.id_sucursal || '', id_area: p.id_area || '', rol: rol };
+      if (nuevo) {
+        var clave = p.clave ? String(p.clave) : azar(10); if (p.clave) validarClave(clave, usuario);
+        var u = Object.assign({ id_usuario: siguienteId('Usuarios'), estado: 'Activo', clave_hash: '', clave_salt: '', debe_cambiar_clave: true, creado_en: ahora(), ultimo_acceso: '' }, campos);
+        Db.lock(function () { Db.insert('Usuarios', [u]); });
+        sucio('Usuarios'); fijarClave(u, clave, true); log(ctx, 'USUARIO_CREADO', usuario + ' (' + rol + ')');
+        return { usuario: seguro(u), claveTemporal: clave };
+      }
+      var actual = primero(T('Usuarios'), function (x) { return x.id_usuario === p.id_usuario; });
+      if (!actual) throw err('El usuario no existe');
+      if (actual.rol === 'Administrador' && rol !== 'Administrador' && admins().length <= 1) throw err('Debe quedar al menos un administrador activo');
+      Db.updateWhere('Usuarios', function (r) { return r.id_usuario === p.id_usuario; }, campos); sucio('Usuarios');
+      log(ctx, 'USUARIO_EDITADO', usuario);
+      return { usuario: seguro(Object.assign({}, actual, campos)) };
+    },
+    usuarioEstado: function (p, ctx) {
+      var u = primero(T('Usuarios'), function (x) { return x.id_usuario === p.id_usuario; });
+      if (!u) throw err('El usuario no existe');
+      if (['Activo', 'Inactivo'].indexOf(p.estado) < 0) throw err('Estado inválido');
+      if (p.estado === 'Inactivo') {
+        if (u.id_usuario === ctx.usuario.id_usuario) throw err('No puedes deshabilitar tu propia cuenta');
+        if (u.rol === 'Administrador' && admins().length <= 1) throw err('Debe quedar al menos un administrador activo');
+      }
+      Db.updateWhere('Usuarios', function (r) { return r.id_usuario === u.id_usuario; }, { estado: p.estado }); sucio('Usuarios');
+      log(ctx, p.estado === 'Activo' ? 'USUARIO_HABILITADO' : 'USUARIO_DESHABILITADO', u.usuario);
+      return { estado: p.estado };
+    },
+    usuarioClave: function (p, ctx) {
+      var u = primero(T('Usuarios'), function (x) { return x.id_usuario === p.id_usuario; });
+      if (!u) throw err('El usuario no existe');
+      var clave = p.clave ? String(p.clave) : azar(10); if (p.clave) validarClave(clave, u.usuario);
+      fijarClave(u, clave, true); log(ctx, 'CLAVE_RESTABLECIDA', u.usuario);
+      return { claveTemporal: clave };
+    },
+
+    // — Módulo 4 · Catálogos —
+    catalogoList: function (p) {
+      var cfg = { Sucursales: ['id_sucursal', 'id_sucursal'], Areas: ['id_area', 'id_area'] }[p.tabla];
+      if (!cfg) throw err('Catálogo inválido');
+      var us = T('Usuarios');
+      return T(p.tabla).map(function (r) { return { id: r[cfg[0]], nombre: r.nombre, activo: r.activo, usuarios: us.filter(function (u) { return u[cfg[1]] === r[cfg[0]]; }).length }; })
+        .sort(function (a, b) { return a.nombre.localeCompare(b.nombre); });
+    },
+    catalogoGuardar: function (p, ctx) {
+      if (!ESQUEMA[p.tabla] || ['Sucursales', 'Areas'].indexOf(p.tabla) < 0) throw err('Catálogo inválido');
+      var pk = ESQUEMA[p.tabla].pk, nombre = txt(p.nombre, 80);
+      if (!nombre) throw err('Escribe un nombre');
+      if (primero(T(p.tabla), function (r) { return r.nombre.toLowerCase() === nombre.toLowerCase() && r[pk] !== p.id; })) throw err('Ya existe un registro con ese nombre');
+      if (p.id) {
+        if (!primero(T(p.tabla), function (r) { return r[pk] === p.id; })) throw err('El registro no existe');
+        Db.updateWhere(p.tabla, function (r) { return r[pk] === p.id; }, { nombre: nombre });
+      } else {
+        var fila = { nombre: nombre, activo: true }; fila[pk] = siguienteId(p.tabla);
+        Db.lock(function () { Db.insert(p.tabla, [fila]); });
+      }
+      sucio(p.tabla); log(ctx, 'CATALOGO_' + p.tabla.toUpperCase(), nombre);
+      return true;
+    },
+    catalogoEstado: function (p, ctx) {
+      if (['Sucursales', 'Areas'].indexOf(p.tabla) < 0) throw err('Catálogo inválido');
+      var pk = ESQUEMA[p.tabla].pk;
+      Db.updateWhere(p.tabla, function (r) { return r[pk] === p.id; }, { activo: !!p.activo }); sucio(p.tabla);
+      log(ctx, 'CATALOGO_ESTADO', p.tabla + ' ' + p.id + ' → ' + (p.activo ? 'activo' : 'inactivo'));
+      return true;
+    },
+
+    // — Módulo 2 · Evaluaciones (admin) —
+    evaluacionesAdmin: function () {
+      var qs = T('Preguntas'), vig = intentosVigentes();
+      return T('Evaluaciones').sort(function (a, b) { return a.orden - b.orden; }).map(function (e) {
+        return { id_evaluacion: e.id_evaluacion, codigo: e.codigo, tipo: e.tipo, motor: e.motor, nombre: e.nombre, descripcion: e.descripcion, estado: e.estado, version: e.version,
+                 items: e.tipo === 'TEST' ? qs.filter(function (q) { return q.id_evaluacion === e.id_evaluacion; }).length : (T('Matrices_Columnas').filter(function (c) { return c.id_evaluacion === e.id_evaluacion; }).length),
+                 resultados: e.tipo === 'TEST' ? vig.filter(function (i) { return i.id_evaluacion === e.id_evaluacion; }).length : T('Matrices_Datos').filter(function (r) { return r.id_evaluacion === e.id_evaluacion && r.fila > 0; }).length,
+                 actualizado_en: e.actualizado_en, publicada_en: e.publicada_en };
+      });
+    },
+    evaluacionAdminDef: function (p) { return JSON.parse(JSON.stringify(formatoImport(cargarDef(p.id_evaluacion), true))); },
+    evaluacionEstado: function (p, ctx) {
+      var ev = cargarEval(p.id_evaluacion);
+      if ((TRANSICIONES[ev.estado] || []).indexOf(p.estado) < 0) throw err('No se puede pasar de ' + ev.estado + ' a ' + p.estado);
+      if (p.estado === 'Habilitada' && ev.estado === 'Borrador') {
+        var errores = Motor.validarDefinicion(formatoImport(cargarDef(ev.id_evaluacion)));
+        if (errores.length) throw err('La evaluación tiene errores y no puede habilitarse', 'VALIDACION', errores);
+      }
+      var patch = { estado: p.estado, actualizado_en: ahora() }; if (p.estado === 'Publicada') patch.publicada_en = ahora();
+      Db.updateWhere('Evaluaciones', function (r) { return r.id_evaluacion === ev.id_evaluacion; }, patch); sucio('Evaluaciones');
+      log(ctx, 'EVAL_' + p.estado.toUpperCase(), ev.codigo);
+      return { estado: p.estado };
+    },
+    editarTexto: function (p, ctx) {
+      var permitidos = EDITABLE[p.tabla];
+      if (!permitidos || permitidos.indexOf(p.campo) < 0) throw err('Ese campo no se puede editar desde la interfaz');
+      var pk = ESQUEMA[p.tabla].pk, fila = primero(T(p.tabla), function (r) { return r[pk] === p.id; });
+      if (!fila) throw err('El registro no existe');
+      var valor = txt(p.valor, 2000); if (!valor && p.campo !== 'nota' && p.campo !== 'descripcion') throw err('El texto no puede quedar vacío');
+      var idEv = p.tabla === 'Evaluaciones' ? fila.id_evaluacion : p.tabla === 'Opciones' ? primero(T('Preguntas'), function (q) { return q.id_pregunta === fila.id_pregunta; }).id_evaluacion : fila.id_evaluacion;
+      var patch = {}; patch[p.campo] = valor;
+      Db.lock(function () {
+        Db.updateWhere(p.tabla, function (r) { return r[pk] === p.id; }, patch);
+        var ev = cargarEval(idEv);
+        Db.updateWhere('Evaluaciones', function (r) { return r.id_evaluacion === idEv; }, { version: ev.version + 1, actualizado_en: ahora() });
+      });
+      sucio(p.tabla); sucio('Evaluaciones'); log(ctx, 'EVAL_TEXTO', p.tabla + ' ' + p.id);
+      return true;
+    },
+    evaluacionImportar: function (p, ctx) {
+      var d = typeof p.json === 'string' ? (function () { try { return JSON.parse(p.json); } catch (x) { throw err('El JSON no es válido: ' + x.message); } })() : p.json;
+      var errores = Motor.validarDefinicion(d);
+      if (!errores.length && primero(T('Evaluaciones'), function (e) { return e.codigo === d.codigo; })) errores.push('Ya existe una evaluación con el código ' + d.codigo);
+      if (errores.length) throw err('El archivo tiene ' + errores.length + ' error(es)', 'VALIDACION', errores);
+      var orden = T('Evaluaciones').reduce(function (m, e) { return Math.max(m, e.orden); }, 0) + 1;
+      Db.lock(function () { insertarDef(d, 'Borrador', orden); });
+      log(ctx, 'EVAL_IMPORTADA', d.codigo);
+      return { id_evaluacion: 'EV-' + d.codigo };
+    },
+    evaluacionExportar: function (p) { return JSON.stringify(formatoImport(cargarDef(p.id_evaluacion)), null, 2); },
+    evaluacionEliminar: function (p, ctx) {
+      var ev = cargarEval(p.id_evaluacion);
+      if (ev.estado !== 'Borrador') throw err('Solo se pueden eliminar evaluaciones en Borrador');
+      if (T('Intentos').some(function (i) { return i.id_evaluacion === ev.id_evaluacion; })) throw err('La evaluación ya tiene resultados');
+      var id = ev.id_evaluacion, pids = {}; T('Preguntas').forEach(function (q) { if (q.id_evaluacion === id) pids[q.id_pregunta] = 1; });
+      Db.lock(function () {
+        Db.removeWhere('Opciones', function (r) { return pids[r.id_pregunta]; });
+        ['Preguntas', 'Dimensiones', 'Interpretaciones', 'Matrices_Columnas', 'Matrices_Filas_Fijas', 'Matrices_Datos', 'Evaluaciones'].forEach(function (t) {
+          Db.removeWhere(t, function (r) { return r.id_evaluacion === id; });
+        });
+      });
+      Object.keys(memo).forEach(sucio); log(ctx, 'EVAL_ELIMINADA', ev.codigo);
+      return true;
+    }
+  };
+  function admins() { return T('Usuarios').filter(function (u) { return u.rol === 'Administrador' && u.estado === 'Activo'; }); }
+
+  // ───────────── instalación ─────────────
+  /** Siembra tests y matrices desde Seed.gs (estado Publicada salvo que se indique). Idempotente por código. */
+  function sembrar(seed, estado) {
+    memo = {};
+    var creadas = 0;
+    seed.evaluaciones.forEach(function (d) {
+      if (primero(T('Evaluaciones'), function (e) { return e.codigo === d.codigo; })) return;
+      insertarDef(d, estado || 'Publicada', d.orden); creadas++;
+    });
+    return creadas;
+  }
+  function crearAdmin(usuario, nombre, clave) {
+    memo = {};
+    var u = { id_usuario: siguienteId('Usuarios'), usuario: usuario, nombre: nombre, cargo: '', id_sucursal: '', id_area: '', rol: 'Administrador', estado: 'Activo',
+              clave_hash: '', clave_salt: '', debe_cambiar_clave: true, creado_en: ahora(), ultimo_acceso: '' };
+    Db.insert('Usuarios', [u]); sucio('Usuarios'); fijarClave(u, clave, true);
+    return u;
+  }
+  function restablecerClaveAdmin(usuario) {
+    memo = {};
+    var u = primero(T('Usuarios'), function (x) { return x.usuario === usuario && x.rol === 'Administrador'; });
+    if (!u) throw new Error('No existe el administrador "' + usuario + '"');
+    var clave = azar(10); fijarClave(u, clave, true);
+    Db.updateWhere('Usuarios', function (r) { return r.id_usuario === u.id_usuario; }, { estado: 'Activo' });
+    return clave;
+  }
+
+  function ejecutar(token, accion, p) {
+    memo = {};
+    try {
+      var h = ACCIONES[accion]; if (!h) throw err('Acción desconocida: ' + accion);
+      var ctx = null;
+      if (accion !== 'login') {
+        ctx = sesion(token);
+        if (SOLO_ADMIN[accion] && ctx.usuario.rol !== 'Administrador') throw err('No tienes permiso para esta acción', '403');
+        if (ctx.usuario.debe_cambiar_clave && ['cambiarClave', 'logout', 'sesion'].indexOf(accion) < 0) throw err('Debes cambiar tu clave temporal antes de continuar', 'CAMBIAR_CLAVE');
+      }
+      return { ok: true, data: h(p || {}, ctx) };
+    } catch (e) {
+      if (!e.esApi && typeof console !== 'undefined') console.error(e);
+      return { ok: false, error: e.esApi ? e.message : 'Error interno: ' + (e && e.message), codigo: e.codigo || 'ERR', detalles: e.detalles };
+    }
+  }
+
+  return { ejecutar: ejecutar, sembrar: sembrar, crearAdmin: crearAdmin, restablecerClaveAdmin: restablecerClaveAdmin, sha256: sha256 };
+})();
+
+/**
+ * Seed.gs — GENERADO por tools/gen_seed.py desde el Excel fuente. No editar a mano.
+ * Contiene 6 tests + 7 matrices con preguntas, opciones, claves y textos literales del libro.
+ */
+var SEED = {
+ "fuente": {
+  "archivo": "Modulo1_Tests_y_Matrices_OMR.xlsx",
+  "programa": "OSCAR MÉNDEZ RHEA  ·  LIDERAZGO MULTIPLICADOR",
+  "modulo": "Módulo 1 — Tests y Matrices de Aplicación",
+  "lema": "Atrae, desarrolla, multiplica",
+  "aviso": "Los tests 1, 2, 5 y 6 provienen del material del Programa de Liderazgo Multiplicador (Encuentro 1). Los tests 3 y 4 fueron diseñados para este programa como herramientas de autoconocimiento, inspirados en McClelland y en la teoría de metaprogramas; no son instrumentos psicométricos validados."
+ },
+ "evaluaciones": [
+  {
+   "codigo": "T01",
+   "orden": 1,
+   "tipo": "TEST",
+   "motor": "ESCALA_AREAS",
+   "nombre": "La Rueda de la Vida",
+   "descripcion": "Test: califica 42 afirmaciones (1 a 5) en 7 áreas de tu vida.",
+   "instruccion": "Califica cada afirmación del 1 (satisfacción más baja) al 5 (más alta). Si una afirmación no aplica a tu vida, déjala en blanco.",
+   "escala": {
+    "min": 1,
+    "max": 5,
+    "etiquetas": {
+     "1": "Satisfacción más baja",
+     "5": "Satisfacción más alta"
+    },
+    "omitible": true
+   },
+   "config": {},
+   "nota": null,
+   "dimensiones": [
+    {
+     "codigo": "SAL",
+     "nombre": "Salud",
+     "grupo": null,
+     "orden": 1,
+     "desempate": 0
+    },
+    {
+     "codigo": "DES",
+     "nombre": "Desarrollo personal",
+     "grupo": null,
+     "orden": 2,
+     "desempate": 0
+    },
+    {
+     "codigo": "FAM",
+     "nombre": "Familia",
+     "grupo": null,
+     "orden": 3,
+     "desempate": 0
+    },
+    {
+     "codigo": "ECO",
+     "nombre": "Económica",
+     "grupo": null,
+     "orden": 4,
+     "desempate": 0
+    },
+    {
+     "codigo": "PRO",
+     "nombre": "Profesional",
+     "grupo": null,
+     "orden": 5,
+     "desempate": 0
+    },
+    {
+     "codigo": "SOC",
+     "nombre": "Social",
+     "grupo": null,
+     "orden": 6,
+     "desempate": 0
+    },
+    {
+     "codigo": "ESP",
+     "nombre": "Espiritual",
+     "grupo": null,
+     "orden": 7,
+     "desempate": 0
+    }
+   ],
+   "preguntas": [
+    {
+     "numero": 1,
+     "seccion": "ÁREA SALUD",
+     "texto": "Satisfacción con mi aspecto físico",
+     "dimension": "SAL"
+    },
+    {
+     "numero": 2,
+     "seccion": "ÁREA SALUD",
+     "texto": "Adecuado nivel de salud y energía",
+     "dimension": "SAL"
+    },
+    {
+     "numero": 3,
+     "seccion": "ÁREA SALUD",
+     "texto": "Peso adecuado para mi talla y edad",
+     "dimension": "SAL"
+    },
+    {
+     "numero": 4,
+     "seccion": "ÁREA SALUD",
+     "texto": "Tengo una dieta equilibrada",
+     "dimension": "SAL"
+    },
+    {
+     "numero": 5,
+     "seccion": "ÁREA SALUD",
+     "texto": "Hago deporte con regularidad",
+     "dimension": "SAL"
+    },
+    {
+     "numero": 6,
+     "seccion": "ÁREA SALUD",
+     "texto": "Realizo chequeos médicos periódicos",
+     "dimension": "SAL"
+    },
+    {
+     "numero": 7,
+     "seccion": "ÁREA DESARROLLO PERSONAL",
+     "texto": "Dedico tiempo a mi desarrollo personal",
+     "dimension": "DES"
+    },
+    {
+     "numero": 8,
+     "seccion": "ÁREA DESARROLLO PERSONAL",
+     "texto": "Disfruto de la vida",
+     "dimension": "DES"
+    },
+    {
+     "numero": 9,
+     "seccion": "ÁREA DESARROLLO PERSONAL",
+     "texto": "Mi nivel de autoestima es",
+     "dimension": "DES"
+    },
+    {
+     "numero": 10,
+     "seccion": "ÁREA DESARROLLO PERSONAL",
+     "texto": "Mi nivel de felicidad",
+     "dimension": "DES"
+    },
+    {
+     "numero": 11,
+     "seccion": "ÁREA DESARROLLO PERSONAL",
+     "texto": "Mis relaciones interpersonales son",
+     "dimension": "DES"
+    },
+    {
+     "numero": 12,
+     "seccion": "ÁREA DESARROLLO PERSONAL",
+     "texto": "Hago cosas que me benefician",
+     "dimension": "DES"
+    },
+    {
+     "numero": 13,
+     "seccion": "ÁREA FAMILIA",
+     "texto": "Destino suficiente tiempo a la familia",
+     "dimension": "FAM"
+    },
+    {
+     "numero": 14,
+     "seccion": "ÁREA FAMILIA",
+     "texto": "Calidad de relación con seres más cercanos",
+     "dimension": "FAM"
+    },
+    {
+     "numero": 15,
+     "seccion": "ÁREA FAMILIA",
+     "texto": "Relación con padres",
+     "dimension": "FAM"
+    },
+    {
+     "numero": 16,
+     "seccion": "ÁREA FAMILIA",
+     "texto": "Relación con hijos",
+     "dimension": "FAM"
+    },
+    {
+     "numero": 17,
+     "seccion": "ÁREA FAMILIA",
+     "texto": "Relación con otros miembros de la familia",
+     "dimension": "FAM"
+    },
+    {
+     "numero": 18,
+     "seccion": "ÁREA FAMILIA",
+     "texto": "Doy prioridad a la familia",
+     "dimension": "FAM"
+    },
+    {
+     "numero": 19,
+     "seccion": "ÁREA ECONÓMICA",
+     "texto": "Mi situación material es",
+     "dimension": "ECO"
+    },
+    {
+     "numero": 20,
+     "seccion": "ÁREA ECONÓMICA",
+     "texto": "Realizo presupuesto personal",
+     "dimension": "ECO"
+    },
+    {
+     "numero": 21,
+     "seccion": "ÁREA ECONÓMICA",
+     "texto": "Control de presupuesto",
+     "dimension": "ECO"
+    },
+    {
+     "numero": 22,
+     "seccion": "ÁREA ECONÓMICA",
+     "texto": "Nivel de ahorro",
+     "dimension": "ECO"
+    },
+    {
+     "numero": 23,
+     "seccion": "ÁREA ECONÓMICA",
+     "texto": "Finanzas personales saludables",
+     "dimension": "ECO"
+    },
+    {
+     "numero": 24,
+     "seccion": "ÁREA ECONÓMICA",
+     "texto": "Metas materiales",
+     "dimension": "ECO"
+    },
+    {
+     "numero": 25,
+     "seccion": "ÁREA PROFESIONAL",
+     "texto": "Trabajo en el lugar deseado",
+     "dimension": "PRO"
+    },
+    {
+     "numero": 26,
+     "seccion": "ÁREA PROFESIONAL",
+     "texto": "Nivel de realización laboral",
+     "dimension": "PRO"
+    },
+    {
+     "numero": 27,
+     "seccion": "ÁREA PROFESIONAL",
+     "texto": "Nivel de profesionalización",
+     "dimension": "PRO"
+    },
+    {
+     "numero": 28,
+     "seccion": "ÁREA PROFESIONAL",
+     "texto": "Ambiente de trabajo agradable",
+     "dimension": "PRO"
+    },
+    {
+     "numero": 29,
+     "seccion": "ÁREA PROFESIONAL",
+     "texto": "Tengo buena perspectiva de carrera",
+     "dimension": "PRO"
+    },
+    {
+     "numero": 30,
+     "seccion": "ÁREA PROFESIONAL",
+     "texto": "Me actualizo constantemente",
+     "dimension": "PRO"
+    },
+    {
+     "numero": 31,
+     "seccion": "ÁREA SOCIAL",
+     "texto": "Tengo buenas amistades",
+     "dimension": "SOC"
+    },
+    {
+     "numero": 32,
+     "seccion": "ÁREA SOCIAL",
+     "texto": "Cuido a mis amistades",
+     "dimension": "SOC"
+    },
+    {
+     "numero": 33,
+     "seccion": "ÁREA SOCIAL",
+     "texto": "Doy tiempo a mi relación de pareja",
+     "dimension": "SOC"
+    },
+    {
+     "numero": 34,
+     "seccion": "ÁREA SOCIAL",
+     "texto": "Disfruto y valoro la compañía de mi pareja",
+     "dimension": "SOC"
+    },
+    {
+     "numero": 35,
+     "seccion": "ÁREA SOCIAL",
+     "texto": "Realizo actividades gratificantes con amigos",
+     "dimension": "SOC"
+    },
+    {
+     "numero": 36,
+     "seccion": "ÁREA SOCIAL",
+     "texto": "Me siento satisfecho con mi vida social",
+     "dimension": "SOC"
+    },
+    {
+     "numero": 37,
+     "seccion": "ÁREA ESPIRITUAL",
+     "texto": "Tengo claros mis metas, principios y creencias",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 38,
+     "seccion": "ÁREA ESPIRITUAL",
+     "texto": "Lectura / Cine / Teatro / Cultura",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 39,
+     "seccion": "ÁREA ESPIRITUAL",
+     "texto": "Soy un buen ciudadano y cumplo con las leyes",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 40,
+     "seccion": "ÁREA ESPIRITUAL",
+     "texto": "Aporto a mi entorno inmediato",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 41,
+     "seccion": "ÁREA ESPIRITUAL",
+     "texto": "Realizo algo por los demás y por los más débiles",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 42,
+     "seccion": "ÁREA ESPIRITUAL",
+     "texto": "Aporto económicamente a una causa altruista",
+     "dimension": "ESP"
+    }
+   ],
+   "interpretaciones": [
+    {
+     "tipo": "GUIA",
+     "codigo": "REFLEXION",
+     "umbral_min": null,
+     "texto": "Reflexión: elige tus 2 áreas más bajas y define una acción concreta y medible para cada una en la hoja “Mi Perfil”."
+    }
+   ]
+  },
+  {
+   "codigo": "T02",
+   "orden": 2,
+   "tipo": "TEST",
+   "motor": "MARCAS_EXACTAS",
+   "nombre": "Sistemas Representacionales (VAK)",
+   "descripcion": "Test: marca con “x” las 20 palabras que más te impresionen.",
+   "instruccion": "Lee la lista y marca con una “x” las 20 palabras que, por alguna razón, más te impresionen o destaquen en tu percepción. No lo pienses demasiado.",
+   "escala": {},
+   "config": {
+    "marcas": 20
+   },
+   "nota": null,
+   "dimensiones": [
+    {
+     "codigo": "V",
+     "nombre": "Visual",
+     "grupo": null,
+     "orden": 1,
+     "desempate": 0,
+     "descripcion": "Visual — entiende el mundo como lo ve (usa gráficos, contacto visual)."
+    },
+    {
+     "codigo": "A",
+     "nombre": "Auditivo",
+     "grupo": null,
+     "orden": 2,
+     "desempate": 0,
+     "descripcion": "Auditivo — atento a palabras y sonidos (modula el tono, parafrasea)."
+    },
+    {
+     "codigo": "K",
+     "nombre": "Kinestésico",
+     "grupo": null,
+     "orden": 3,
+     "desempate": 0,
+     "descripcion": "Kinestésico — siente y experimenta (invítalo a probar)."
+    }
+   ],
+   "preguntas": [
+    {
+     "numero": 1,
+     "seccion": null,
+     "texto": "Tronar",
+     "dimension": "A"
+    },
+    {
+     "numero": 2,
+     "seccion": null,
+     "texto": "Retrato",
+     "dimension": "V"
+    },
+    {
+     "numero": 3,
+     "seccion": null,
+     "texto": "Mordedura",
+     "dimension": "K"
+    },
+    {
+     "numero": 4,
+     "seccion": null,
+     "texto": "Desafinado",
+     "dimension": "A"
+    },
+    {
+     "numero": 5,
+     "seccion": null,
+     "texto": "Aureola",
+     "dimension": "V"
+    },
+    {
+     "numero": 6,
+     "seccion": null,
+     "texto": "Mezclar",
+     "dimension": "K"
+    },
+    {
+     "numero": 7,
+     "seccion": null,
+     "texto": "Emoción",
+     "dimension": "K"
+    },
+    {
+     "numero": 8,
+     "seccion": null,
+     "texto": "Trompeta",
+     "dimension": "A"
+    },
+    {
+     "numero": 9,
+     "seccion": null,
+     "texto": "Apariencia",
+     "dimension": "V"
+    },
+    {
+     "numero": 10,
+     "seccion": null,
+     "texto": "Espejismo",
+     "dimension": "V"
+    },
+    {
+     "numero": 11,
+     "seccion": null,
+     "texto": "Gruñido",
+     "dimension": "A"
+    },
+    {
+     "numero": 12,
+     "seccion": null,
+     "texto": "Ventolera",
+     "dimension": "K"
+    },
+    {
+     "numero": 13,
+     "seccion": null,
+     "texto": "Comodidad",
+     "dimension": "K"
+    },
+    {
+     "numero": 14,
+     "seccion": null,
+     "texto": "Audiencia",
+     "dimension": "A"
+    },
+    {
+     "numero": 15,
+     "seccion": null,
+     "texto": "Desteñido",
+     "dimension": "V"
+    },
+    {
+     "numero": 16,
+     "seccion": null,
+     "texto": "Picor",
+     "dimension": "K"
+    },
+    {
+     "numero": 17,
+     "seccion": null,
+     "texto": "Ruborizarse",
+     "dimension": "V"
+    },
+    {
+     "numero": 18,
+     "seccion": null,
+     "texto": "Palpable",
+     "dimension": "K"
+    },
+    {
+     "numero": 19,
+     "seccion": null,
+     "texto": "Iluminación",
+     "dimension": "V"
+    },
+    {
+     "numero": 20,
+     "seccion": null,
+     "texto": "Dulzura",
+     "dimension": "K"
+    },
+    {
+     "numero": 21,
+     "seccion": null,
+     "texto": "Eco",
+     "dimension": "A"
+    },
+    {
+     "numero": 22,
+     "seccion": null,
+     "texto": "Transparente",
+     "dimension": "V"
+    },
+    {
+     "numero": 23,
+     "seccion": null,
+     "texto": "Timbre",
+     "dimension": "A"
+    },
+    {
+     "numero": 24,
+     "seccion": null,
+     "texto": "Enfocar",
+     "dimension": "V"
+    },
+    {
+     "numero": 25,
+     "seccion": null,
+     "texto": "Perfume",
+     "dimension": "K"
+    },
+    {
+     "numero": 26,
+     "seccion": null,
+     "texto": "Ofuscar",
+     "dimension": "V"
+    },
+    {
+     "numero": 27,
+     "seccion": null,
+     "texto": "Ruido",
+     "dimension": "A"
+    },
+    {
+     "numero": 28,
+     "seccion": null,
+     "texto": "Panorama",
+     "dimension": "V"
+    },
+    {
+     "numero": 29,
+     "seccion": null,
+     "texto": "Elocuencia",
+     "dimension": "A"
+    },
+    {
+     "numero": 30,
+     "seccion": null,
+     "texto": "Periscopio",
+     "dimension": "V"
+    },
+    {
+     "numero": 31,
+     "seccion": null,
+     "texto": "Silbido",
+     "dimension": "A"
+    },
+    {
+     "numero": 32,
+     "seccion": null,
+     "texto": "Colorear",
+     "dimension": "V"
+    },
+    {
+     "numero": 33,
+     "seccion": null,
+     "texto": "Cascabel",
+     "dimension": "A"
+    },
+    {
+     "numero": 34,
+     "seccion": null,
+     "texto": "Sumergirse",
+     "dimension": "K"
+    },
+    {
+     "numero": 35,
+     "seccion": null,
+     "texto": "Discurso",
+     "dimension": "A"
+    },
+    {
+     "numero": 36,
+     "seccion": null,
+     "texto": "Quemadura",
+     "dimension": "K"
+    },
+    {
+     "numero": 37,
+     "seccion": null,
+     "texto": "Murmurar",
+     "dimension": "A"
+    },
+    {
+     "numero": 38,
+     "seccion": null,
+     "texto": "Sabroso",
+     "dimension": "K"
+    },
+    {
+     "numero": 39,
+     "seccion": null,
+     "texto": "Gesticular",
+     "dimension": "K"
+    },
+    {
+     "numero": 40,
+     "seccion": null,
+     "texto": "Espina",
+     "dimension": "K"
+    },
+    {
+     "numero": 41,
+     "seccion": null,
+     "texto": "Estampa",
+     "dimension": "V"
+    },
+    {
+     "numero": 42,
+     "seccion": null,
+     "texto": "Sensación",
+     "dimension": "K"
+    },
+    {
+     "numero": 43,
+     "seccion": null,
+     "texto": "Acento",
+     "dimension": "A"
+    },
+    {
+     "numero": 44,
+     "seccion": null,
+     "texto": "Visualización",
+     "dimension": "V"
+    },
+    {
+     "numero": 45,
+     "seccion": null,
+     "texto": "Aroma",
+     "dimension": "K"
+    },
+    {
+     "numero": 46,
+     "seccion": null,
+     "texto": "Ritmo",
+     "dimension": "A"
+    },
+    {
+     "numero": 47,
+     "seccion": null,
+     "texto": "Húmedo",
+     "dimension": "K"
+    },
+    {
+     "numero": 48,
+     "seccion": null,
+     "texto": "Retórica",
+     "dimension": "A"
+    },
+    {
+     "numero": 49,
+     "seccion": null,
+     "texto": "Gorjeo",
+     "dimension": "A"
+    },
+    {
+     "numero": 50,
+     "seccion": null,
+     "texto": "Áspero",
+     "dimension": "K"
+    },
+    {
+     "numero": 51,
+     "seccion": null,
+     "texto": "Pálido",
+     "dimension": "V"
+    },
+    {
+     "numero": 52,
+     "seccion": null,
+     "texto": "Griterío",
+     "dimension": "A"
+    },
+    {
+     "numero": 53,
+     "seccion": null,
+     "texto": "Terciopelo",
+     "dimension": "K"
+    },
+    {
+     "numero": 54,
+     "seccion": null,
+     "texto": "Claridad",
+     "dimension": "V"
+    },
+    {
+     "numero": 55,
+     "seccion": null,
+     "texto": "Observar",
+     "dimension": "V"
+    },
+    {
+     "numero": 56,
+     "seccion": null,
+     "texto": "Silencio",
+     "dimension": "A"
+    },
+    {
+     "numero": 57,
+     "seccion": null,
+     "texto": "Arrancar",
+     "dimension": "K"
+    },
+    {
+     "numero": 58,
+     "seccion": null,
+     "texto": "Brillante",
+     "dimension": "V"
+    },
+    {
+     "numero": 59,
+     "seccion": null,
+     "texto": "Orquesta",
+     "dimension": "A"
+    },
+    {
+     "numero": 60,
+     "seccion": null,
+     "texto": "Paisaje",
+     "dimension": "V"
+    },
+    {
+     "numero": 61,
+     "seccion": null,
+     "texto": "Textura",
+     "dimension": "K"
+    },
+    {
+     "numero": 62,
+     "seccion": null,
+     "texto": "Acústico",
+     "dimension": "A"
+    },
+    {
+     "numero": 63,
+     "seccion": null,
+     "texto": "Aferrar",
+     "dimension": "K"
+    },
+    {
+     "numero": 64,
+     "seccion": null,
+     "texto": "Espero",
+     "dimension": "V"
+    },
+    {
+     "numero": 65,
+     "seccion": null,
+     "texto": "Sinfonía",
+     "dimension": "A"
+    },
+    {
+     "numero": 66,
+     "seccion": null,
+     "texto": "Escenario",
+     "dimension": "V"
+    }
+   ],
+   "interpretaciones": [
+    {
+     "tipo": "DIMENSION",
+     "codigo": "V",
+     "umbral_min": null,
+     "texto": "Visual — entiende el mundo como lo ve (usa gráficos, contacto visual)."
+    },
+    {
+     "tipo": "DIMENSION",
+     "codigo": "A",
+     "umbral_min": null,
+     "texto": "Auditivo — atento a palabras y sonidos (modula el tono, parafrasea)."
+    },
+    {
+     "tipo": "DIMENSION",
+     "codigo": "K",
+     "umbral_min": null,
+     "texto": "Kinestésico — siente y experimenta (invítalo a probar)."
+    },
+    {
+     "tipo": "GUIA",
+     "codigo": "EMPATE",
+     "umbral_min": null,
+     "texto": "Tienes dos canales fuertes."
+    }
+   ]
+  },
+  {
+   "codigo": "T03",
+   "orden": 3,
+   "tipo": "TEST",
+   "motor": "ESCALA_FACTORES",
+   "nombre": "Factores Motivacionales (McClelland)",
+   "descripcion": "Test: 18 afirmaciones (1 a 5) · Logro, Poder, Afiliación.",
+   "instruccion": "Califica qué tanto te describe cada afirmación: 1 = nada, 2 = poco, 3 = a veces, 4 = bastante, 5 = totalmente. Responde cómo ERES, no cómo deberías ser.",
+   "escala": {
+    "min": 1,
+    "max": 5,
+    "etiquetas": {
+     "1": "Nada",
+     "2": "Poco",
+     "3": "A veces",
+     "4": "Bastante",
+     "5": "Totalmente"
+    }
+   },
+   "config": {
+    "max_por_factor": 30
+   },
+   "nota": "Herramienta de autoconocimiento diseñada para este programa, inspirada en la teoría de motivación de David McClelland. No es un instrumento psicométrico validado: úsala como punto de partida para la conversación.",
+   "dimensiones": [
+    {
+     "codigo": "L",
+     "nombre": "Logro",
+     "grupo": null,
+     "orden": 1,
+     "desempate": 0.03,
+     "descripcion": "Retos claros y métricas de éxito; reconocimiento de tus resultados."
+    },
+    {
+     "codigo": "P",
+     "nombre": "Poder",
+     "grupo": null,
+     "orden": 2,
+     "desempate": 0.02,
+     "descripcion": "Espacios de liderazgo o vocería; responsabilidad visible e influencia."
+    },
+    {
+     "codigo": "F",
+     "nombre": "Afiliación",
+     "grupo": null,
+     "orden": 3,
+     "desempate": 0.01,
+     "descripcion": "Trabajo en equipo, armonía, colaboración y relaciones de confianza."
+    }
+   ],
+   "preguntas": [
+    {
+     "numero": 1,
+     "seccion": null,
+     "texto": "Me motiva superar metas difíciles, incluso las que yo mismo me pongo.",
+     "dimension": "L"
+    },
+    {
+     "numero": 2,
+     "seccion": null,
+     "texto": "Me gusta tomar las decisiones importantes del equipo.",
+     "dimension": "P"
+    },
+    {
+     "numero": 3,
+     "seccion": null,
+     "texto": "Me motiva más trabajar en equipo que trabajar solo.",
+     "dimension": "F"
+    },
+    {
+     "numero": 4,
+     "seccion": null,
+     "texto": "Necesito saber con métricas claras cómo voy avanzando.",
+     "dimension": "L"
+    },
+    {
+     "numero": 5,
+     "seccion": null,
+     "texto": "Para mí es importante que todos en el equipo nos llevemos bien.",
+     "dimension": "F"
+    },
+    {
+     "numero": 6,
+     "seccion": null,
+     "texto": "Disfruto influir en las opiniones y decisiones de los demás.",
+     "dimension": "P"
+    },
+    {
+     "numero": 7,
+     "seccion": null,
+     "texto": "Me motiva que me reconozcan como referente o experto.",
+     "dimension": "P"
+    },
+    {
+     "numero": 8,
+     "seccion": null,
+     "texto": "Disfruto encontrar una mejor manera de hacer las cosas.",
+     "dimension": "L"
+    },
+    {
+     "numero": 9,
+     "seccion": null,
+     "texto": "Me gusta ayudar a mis compañeros aunque no sea mi responsabilidad.",
+     "dimension": "F"
+    },
+    {
+     "numero": 10,
+     "seccion": null,
+     "texto": "Me afecta cuando alguien del equipo queda fuera.",
+     "dimension": "F"
+    },
+    {
+     "numero": 11,
+     "seccion": null,
+     "texto": "Prefiero retos exigentes antes que tareas fáciles y seguras.",
+     "dimension": "L"
+    },
+    {
+     "numero": 12,
+     "seccion": null,
+     "texto": "Prefiero dirigir un proyecto antes que ser solo parte de él.",
+     "dimension": "P"
+    },
+    {
+     "numero": 13,
+     "seccion": null,
+     "texto": "Me gusta estar en la mesa donde se definen las cosas.",
+     "dimension": "P"
+    },
+    {
+     "numero": 14,
+     "seccion": null,
+     "texto": "Valoro las relaciones de confianza a largo plazo con clientes y compañeros.",
+     "dimension": "F"
+    },
+    {
+     "numero": 15,
+     "seccion": null,
+     "texto": "Me siento realizado cuando veo el resultado concreto de mi esfuerzo.",
+     "dimension": "L"
+    },
+    {
+     "numero": 16,
+     "seccion": null,
+     "texto": "Prefiero ambientes colaborativos antes que competitivos.",
+     "dimension": "F"
+    },
+    {
+     "numero": 17,
+     "seccion": null,
+     "texto": "Busco constantemente retroalimentación sobre mi desempeño.",
+     "dimension": "L"
+    },
+    {
+     "numero": 18,
+     "seccion": null,
+     "texto": "Me incomoda que otros contradigan mis ideas sin argumentos.",
+     "dimension": "P"
+    }
+   ],
+   "interpretaciones": [
+    {
+     "tipo": "DIMENSION",
+     "codigo": "L",
+     "umbral_min": null,
+     "texto": "Retos claros y métricas de éxito; reconocimiento de tus resultados."
+    },
+    {
+     "tipo": "DIMENSION",
+     "codigo": "P",
+     "umbral_min": null,
+     "texto": "Espacios de liderazgo o vocería; responsabilidad visible e influencia."
+    },
+    {
+     "tipo": "DIMENSION",
+     "codigo": "F",
+     "umbral_min": null,
+     "texto": "Trabajo en equipo, armonía, colaboración y relaciones de confianza."
+    }
+   ]
+  },
+  {
+   "codigo": "T04",
+   "orden": 4,
+   "tipo": "TEST",
+   "motor": "ELECCION_BINARIA",
+   "nombre": "Metaprogramas",
+   "descripcion": "Test: 16 elecciones A/B · Global/Detalle y Estructura/Opciones.",
+   "instruccion": "En cada fila elige la opción que MÁS te describe: escribe A o B en la columna verde agua. No hay respuestas correctas.",
+   "escala": {},
+   "config": {},
+   "nota": "Herramienta de autoconocimiento diseñada para este programa a partir de los metaprogramas del material (Global/Detalle, Estructura/Opciones). No es un instrumento psicométrico validado.",
+   "dimensiones": [
+    {
+     "codigo": "GLO",
+     "nombre": "Global",
+     "grupo": "Global / Detalle",
+     "orden": 1,
+     "desempate": 0,
+     "descripcion": "Empieza por la visión general y el para qué; ve al grano."
+    },
+    {
+     "codigo": "DET",
+     "nombre": "Detalle",
+     "grupo": "Global / Detalle",
+     "orden": 2,
+     "desempate": 0,
+     "descripcion": "Dame información completa, cifras y guías detalladas."
+    },
+    {
+     "codigo": "EST",
+     "nombre": "Estructura",
+     "grupo": "Estructura / Opciones",
+     "orden": 3,
+     "desempate": 0,
+     "descripcion": "Explícame el proceso paso a paso."
+    },
+    {
+     "codigo": "OPC",
+     "nombre": "Opciones",
+     "grupo": "Estructura / Opciones",
+     "orden": 4,
+     "desempate": 0,
+     "descripcion": "Preséntame alternativas y sé flexible."
+    }
+   ],
+   "preguntas": [
+    {
+     "numero": 1,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "Cuando me explican un proyecto prefiero…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "La idea general y el objetivo",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Los pasos, datos y cifras",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 2,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "Al leer un informe…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Voy directo a las conclusiones",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Reviso cada sección y los anexos",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 3,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "Cuando delego una tarea…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Doy el objetivo y dejo que la persona lo resuelva",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Explico con precisión cómo hacerla",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 4,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "En una reunión me aburre más…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Entrar en demasiados detalles",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Hablar en términos vagos y generales",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 5,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "Al contar algo que me pasó…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Resumo lo esencial",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Cuento la secuencia completa con detalles",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 6,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "Para aprobar una propuesta necesito…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Entender el impacto y el panorama",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Ver números, supuestos y respaldo",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 7,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "Mis correos suelen ser…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Breves y al punto",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Completos y explicativos",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 8,
+     "seccion": "PARTE 1 · GLOBAL (A) vs DETALLE (B)",
+     "texto": "Detecto más fácilmente…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Tendencias y oportunidades",
+       "dimension": "GLO",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Errores y omisiones",
+       "dimension": "DET",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 9,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Para hacer mi trabajo prefiero…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Un procedimiento claro, paso a paso",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Libertad para elegir cómo hacerlo",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 10,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Ante un problema…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Aplico el método que ya funciona",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Exploro varias alternativas",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 11,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Me genera más tensión…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Los cambios de plan de última hora",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Tener una sola forma obligatoria de hacer algo",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 12,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Al planificar mi semana…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Sigo una agenda definida",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "La ajusto sobre la marcha según las oportunidades",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 13,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Una buena instrucción es…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Precisa y con una secuencia clara",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "La que me da opciones",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 14,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Cuando termino una tarea…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Sigo el orden establecido para la siguiente",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Busco nuevas posibilidades",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 15,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Prefiero que mi jefe me diga…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "“Este es el proceso”",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "“¿Qué opciones ves?”",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 16,
+     "seccion": "PARTE 2 · ESTRUCTURA (A) vs OPCIONES (B)",
+     "texto": "Me describe mejor…",
+     "opciones": [
+      {
+       "letra": "A",
+       "texto": "Ordenado y constante",
+       "dimension": "EST",
+       "puntos": 1
+      },
+      {
+       "letra": "B",
+       "texto": "Flexible y creativo",
+       "dimension": "OPC",
+       "puntos": 1
+      }
+     ]
+    }
+   ],
+   "interpretaciones": [
+    {
+     "tipo": "DIMENSION",
+     "codigo": "GLO",
+     "umbral_min": null,
+     "texto": "Empieza por la visión general y el para qué; ve al grano."
+    },
+    {
+     "tipo": "DIMENSION",
+     "codigo": "DET",
+     "umbral_min": null,
+     "texto": "Dame información completa, cifras y guías detalladas."
+    },
+    {
+     "tipo": "DIMENSION",
+     "codigo": "EST",
+     "umbral_min": null,
+     "texto": "Explícame el proceso paso a paso."
+    },
+    {
+     "tipo": "DIMENSION",
+     "codigo": "OPC",
+     "umbral_min": null,
+     "texto": "Preséntame alternativas y sé flexible."
+    }
+   ]
+  },
+  {
+   "codigo": "T05",
+   "orden": 5,
+   "tipo": "TEST",
+   "motor": "SITUACIONAL",
+   "nombre": "Estilos de Liderazgo (Blanchard)",
+   "descripcion": "Test: 12 situaciones, elige a, b, c o d.",
+   "instruccion": "Lee cada situación y elige la opción con la que MÁS te identificas (lo que harías realmente). Escribe a, b, c o d en la columna verde agua.",
+   "escala": {},
+   "config": {
+    "rango_adaptabilidad": [
+     -24,
+     24
+    ]
+   },
+   "nota": "AT = alta tarea · BT = baja tarea · AR = alta relación · BR = baja relación. Blanchard + Tuckman: Formación → Participativo · Tempestad → Supervisor · Normativa → Coach · Alto desempeño → Delegativo. Los rangos de lectura de adaptabilidad son una guía de referencia del programa.",
+   "dimensiones": [
+    {
+     "codigo": "Q1",
+     "nombre": "Supervisor",
+     "grupo": "1 · AT/BR",
+     "orden": 1,
+     "desempate": 0.04
+    },
+    {
+     "codigo": "Q2",
+     "nombre": "Coach",
+     "grupo": "2 · AT/AR",
+     "orden": 2,
+     "desempate": 0.03
+    },
+    {
+     "codigo": "Q3",
+     "nombre": "Participativo",
+     "grupo": "3 · BT/AR",
+     "orden": 3,
+     "desempate": 0.02
+    },
+    {
+     "codigo": "Q4",
+     "nombre": "Delegativo",
+     "grupo": "4 · BT/BR",
+     "orden": 4,
+     "desempate": 0.01
+    }
+   ],
+   "preguntas": [
+    {
+     "numero": 1,
+     "seccion": null,
+     "texto": "Últimamente tus colaboradores no responden a tu trato amistoso y a tu obvia preocupación por el bienestar de ellos. El rendimiento desciende rápidamente.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Dar importancia al uso de procedimientos uniformes y a la necesidad de cumplir con la tarea.",
+       "dimension": "Q1",
+       "puntos": 2
+      },
+      {
+       "letra": "b",
+       "texto": "Estar disponible para discutir el asunto pero sin presionar.",
+       "dimension": "Q3",
+       "puntos": -1
+      },
+      {
+       "letra": "c",
+       "texto": "Hablar con los colaboradores y luego fijar las metas.",
+       "dimension": "Q2",
+       "puntos": 1
+      },
+      {
+       "letra": "d",
+       "texto": "No intervenir intencionadamente.",
+       "dimension": "Q4",
+       "puntos": -2
+      }
+     ]
+    },
+    {
+     "numero": 2,
+     "seccion": null,
+     "texto": "El rendimiento observable del grupo va en aumento. Te has asegurado de que todos los miembros sean conscientes de sus responsabilidades y de los niveles de rendimiento que de ellos se espera.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Crear una relación cordial, pero continuar asegurándose de que todos los miembros sean conscientes de sus responsabilidades y de los niveles de rendimiento esperados.",
+       "dimension": "Q2",
+       "puntos": 2
+      },
+      {
+       "letra": "b",
+       "texto": "No realizar ninguna acción determinada.",
+       "dimension": "Q4",
+       "puntos": -2
+      },
+      {
+       "letra": "c",
+       "texto": "Hacer lo que pueda para que el grupo se sienta importante e involucrado.",
+       "dimension": "Q3",
+       "puntos": 1
+      },
+      {
+       "letra": "d",
+       "texto": "Recalcar la importancia de los plazos límites para los trabajos y las tareas.",
+       "dimension": "Q1",
+       "puntos": -1
+      }
+     ]
+    },
+    {
+     "numero": 3,
+     "seccion": null,
+     "texto": "Los miembros de tu grupo no han podido solucionar un problema por sí solos. Normalmente los has dejado solos. El rendimiento del grupo y las relaciones interpersonales han sido buenas en el pasado.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Involucrar al grupo y juntos tratar de solucionar los problemas.",
+       "dimension": "Q2",
+       "puntos": 1
+      },
+      {
+       "letra": "b",
+       "texto": "Dejar que el grupo lo resuelva solo.",
+       "dimension": "Q4",
+       "puntos": -1
+      },
+      {
+       "letra": "c",
+       "texto": "Actuar rápida y firmemente para corregir la situación y dirigir al grupo.",
+       "dimension": "Q1",
+       "puntos": -2
+      },
+      {
+       "letra": "d",
+       "texto": "Estimular al grupo a trabajar en el problema y estar a su disposición para cualquier discusión.",
+       "dimension": "Q3",
+       "puntos": 2
+      }
+     ]
+    },
+    {
+     "numero": 4,
+     "seccion": null,
+     "texto": "Estás considerando un cambio; tus colaboradores tienen excelentes antecedentes por sus logros. Ellos respetan la necesidad del cambio.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Permitir que el grupo se involucre en el desarrollo del cambio, sin ser demasiado autoritario.",
+       "dimension": "Q3",
+       "puntos": 1
+      },
+      {
+       "letra": "b",
+       "texto": "Comunicar los cambios y luego hacer que se cumplan bajo una estricta supervisión.",
+       "dimension": "Q1",
+       "puntos": -2
+      },
+      {
+       "letra": "c",
+       "texto": "Permitir que el grupo formule su propia dirección.",
+       "dimension": "Q4",
+       "puntos": 2
+      },
+      {
+       "letra": "d",
+       "texto": "Incorporar a la solución las recomendaciones del grupo, pero dirigiendo yo el cambio.",
+       "dimension": "Q2",
+       "puntos": -1
+      }
+     ]
+    },
+    {
+     "numero": 5,
+     "seccion": null,
+     "texto": "El rendimiento del grupo ha estado bajando en los últimos meses. Los miembros no se preocupan por lograr sus objetivos. La redefinición de los roles ha ayudado en el pasado. Siempre has tenido que recordarles que cumplan sus tareas a tiempo.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Permitir que el grupo formule su propia dirección.",
+       "dimension": "Q4",
+       "puntos": -2
+      },
+      {
+       "letra": "b",
+       "texto": "Incorporar a la solución las recomendaciones del grupo, pero vigilando que se alcancen los objetivos.",
+       "dimension": "Q2",
+       "puntos": 1
+      },
+      {
+       "letra": "c",
+       "texto": "Redefinir los roles y responsabilidades y supervisar estrictamente.",
+       "dimension": "Q1",
+       "puntos": 2
+      },
+      {
+       "letra": "d",
+       "texto": "Permitir que el grupo se involucre en tu fijación de metas, pero sin ser demasiado autoritario.",
+       "dimension": "Q3",
+       "puntos": -1
+      }
+     ]
+    },
+    {
+     "numero": 6,
+     "seccion": null,
+     "texto": "Te has incorporado a una organización donde las operaciones son eficientes. Tu antecesor controlaba muy de cerca la situación. Quieres mantener una situación productiva, pero te gustaría empezar a humanizar el ambiente.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Hacer lo que pueda para que el grupo se sienta importante e involucrado en los asuntos.",
+       "dimension": "Q3",
+       "puntos": -1
+      },
+      {
+       "letra": "b",
+       "texto": "Dar importancia a los plazos límites para los trabajos y tareas.",
+       "dimension": "Q1",
+       "puntos": 1
+      },
+      {
+       "letra": "c",
+       "texto": "No intervenir intencionadamente.",
+       "dimension": "Q4",
+       "puntos": -2
+      },
+      {
+       "letra": "d",
+       "texto": "Hacer que el grupo se involucre en la toma de decisiones, pero vigilar que se alcancen los objetivos.",
+       "dimension": "Q2",
+       "puntos": 2
+      }
+     ]
+    },
+    {
+     "numero": 7,
+     "seccion": null,
+     "texto": "Estás considerando algunos cambios importantes en la estructura organizativa. Los miembros del grupo han hecho sugerencias sobre la necesidad del cambio. El grupo ha sido productivo y ha demostrado flexibilidad en sus operaciones.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Definir el cambio y supervisarlo estrictamente.",
+       "dimension": "Q1",
+       "puntos": -2
+      },
+      {
+       "letra": "b",
+       "texto": "Participar con el grupo en el desarrollo del cambio, pero dejar que los miembros organicen la realización.",
+       "dimension": "Q3",
+       "puntos": 2
+      },
+      {
+       "letra": "c",
+       "texto": "Mostrarse dispuesto a hacer los cambios recomendados, pero manteniendo el control de su realización.",
+       "dimension": "Q2",
+       "puntos": -1
+      },
+      {
+       "letra": "d",
+       "texto": "Evitar la confrontación, dejando las cosas como están.",
+       "dimension": "Q4",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 8,
+     "seccion": null,
+     "texto": "El rendimiento del grupo y sus relaciones interpersonales son buenas. Te sientes algo inseguro por la falta de dirección del grupo. Tienes la impresión de que lo estás dirigiendo demasiado poco.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Dejar al grupo solo.",
+       "dimension": "Q4",
+       "puntos": 2
+      },
+      {
+       "letra": "b",
+       "texto": "Discutir la situación con el grupo y luego iniciar yo mismo los cambios necesarios.",
+       "dimension": "Q2",
+       "puntos": -1
+      },
+      {
+       "letra": "c",
+       "texto": "Tomar medidas para dirigir a los colaboradores para que trabajen de una manera determinada.",
+       "dimension": "Q1",
+       "puntos": -2
+      },
+      {
+       "letra": "d",
+       "texto": "Mostrar que respaldo al grupo en la discusión de la situación y no mostrarse autoritario.",
+       "dimension": "Q3",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 9,
+     "seccion": null,
+     "texto": "Has sido nombrado jefe de un comité que ha tardado bastante en presentar sus recomendaciones sobre ciertos cambios. El grupo no sabe con claridad cuáles son sus objetivos. La asistencia ha sido escasa y las reuniones se han convertido casi en tertulias sociales. Potencialmente tienen el talento necesario para ayudar.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Dejar que el grupo busque solo las soluciones a sus problemas.",
+       "dimension": "Q4",
+       "puntos": -2
+      },
+      {
+       "letra": "b",
+       "texto": "Incorporar a la solución las recomendaciones del grupo, pero vigilar que se alcancen los objetivos.",
+       "dimension": "Q2",
+       "puntos": 1
+      },
+      {
+       "letra": "c",
+       "texto": "Definir los niveles de calidad y supervisar cuidadosamente.",
+       "dimension": "Q1",
+       "puntos": 2
+      },
+      {
+       "letra": "d",
+       "texto": "Permitir que el grupo intervenga en la determinación de los objetivos, pero sin presionar.",
+       "dimension": "Q3",
+       "puntos": -1
+      }
+     ]
+    },
+    {
+     "numero": 10,
+     "seccion": null,
+     "texto": "Tus colaboradores, normalmente capaces de responsabilizarse, no están respondiendo a tu reciente redefinición de niveles de calidad.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Permitir que el grupo intervenga en la redefinición de los niveles de calidad, pero sin tomar en sus manos el control.",
+       "dimension": "Q3",
+       "puntos": 1
+      },
+      {
+       "letra": "b",
+       "texto": "Redefinir los niveles de calidad y supervisar cuidadosamente.",
+       "dimension": "Q1",
+       "puntos": -2
+      },
+      {
+       "letra": "c",
+       "texto": "Evitar la confrontación a través de no aplicar presión; no intervenir.",
+       "dimension": "Q4",
+       "puntos": -1
+      },
+      {
+       "letra": "d",
+       "texto": "Incorporar a la solución las recomendaciones del grupo, pero vigilar que se alcancen los niveles de calidad.",
+       "dimension": "Q2",
+       "puntos": 2
+      }
+     ]
+    },
+    {
+     "numero": 11,
+     "seccion": null,
+     "texto": "Has sido ascendido a un nuevo puesto. El jefe anterior no interfería en los asuntos del grupo. El grupo ha manejado muy bien sus tareas y la dirección. Las interrelaciones del grupo son buenas.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Tomar medidas para conseguir que los colaboradores trabajen de una manera determinada.",
+       "dimension": "Q1",
+       "puntos": -2
+      },
+      {
+       "letra": "b",
+       "texto": "Hacer que los colaboradores se vean involucrados en la toma de decisiones y reforzar las buenas contribuciones.",
+       "dimension": "Q3",
+       "puntos": 2
+      },
+      {
+       "letra": "c",
+       "texto": "Discutir el rendimiento previo con el grupo y luego examinar la necesidad de prácticas nuevas.",
+       "dimension": "Q2",
+       "puntos": -1
+      },
+      {
+       "letra": "d",
+       "texto": "Continuar dejando libre al grupo.",
+       "dimension": "Q4",
+       "puntos": 1
+      }
+     ]
+    },
+    {
+     "numero": 12,
+     "seccion": null,
+     "texto": "Información reciente indica que existen algunas dificultades internas entre tus colaboradores. El grupo tiene antecedentes notables por sus logros, ha logrado objetivos de largo alcance y ha trabajado en armonía durante el año anterior. Todos están bien capacitados para la tarea.",
+     "opciones": [
+      {
+       "letra": "a",
+       "texto": "Probar con los colaboradores la solución propuesta por mí mismo y examinar la necesidad de nuevas prácticas.",
+       "dimension": "Q2",
+       "puntos": -1
+      },
+      {
+       "letra": "b",
+       "texto": "Permitir que los miembros del grupo encuentren solos las soluciones.",
+       "dimension": "Q4",
+       "puntos": 2
+      },
+      {
+       "letra": "c",
+       "texto": "Actuar rápida y firmemente para corregir y dirigir.",
+       "dimension": "Q1",
+       "puntos": -2
+      },
+      {
+       "letra": "d",
+       "texto": "Participar en la discusión del problema proporcionando apoyo a los colaboradores.",
+       "dimension": "Q3",
+       "puntos": 1
+      }
+     ]
+    }
+   ],
+   "interpretaciones": [
+    {
+     "tipo": "BANDA",
+     "codigo": "ALTA",
+     "umbral_min": 13,
+     "texto": "Alta: adaptas muy bien tu estilo a la situación"
+    },
+    {
+     "tipo": "BANDA",
+     "codigo": "MEDIA",
+     "umbral_min": 0,
+     "texto": "Media: buena base, afina la lectura de cada situación"
+    },
+    {
+     "tipo": "BANDA",
+     "codigo": "BAJA",
+     "umbral_min": -12,
+     "texto": "Baja: tiendes a usar tu estilo aunque la situación pida otro"
+    },
+    {
+     "tipo": "BANDA",
+     "codigo": "MUY_BAJA",
+     "umbral_min": -999,
+     "texto": "Muy baja: revisa cómo diagnosticas la madurez del equipo"
+    }
+   ]
+  },
+  {
+   "codigo": "T06",
+   "orden": 6,
+   "tipo": "TEST",
+   "motor": "ESCALA_DISCRETA",
+   "nombre": "Roles de Equipo (Belbin)",
+   "descripcion": "Test: 27 afirmaciones, responde 1, 3, 6 o 9.",
+   "instruccion": "Para cada afirmación elige: 1 = En desacuerdo · 3 = Solo un poco de acuerdo · 6 = Bastante de acuerdo · 9 = Totalmente de acuerdo.",
+   "escala": {
+    "valores": [
+     1,
+     3,
+     6,
+     9
+    ],
+    "etiquetas": {
+     "1": "En desacuerdo",
+     "3": "Solo un poco de acuerdo",
+     "6": "Bastante de acuerdo",
+     "9": "Totalmente de acuerdo"
+    }
+   },
+   "config": {
+    "max_por_rol": 27,
+    "orientaciones": [
+     {
+      "grupo": "Personas",
+      "etiqueta": "Orientado a personas"
+     },
+     {
+      "grupo": "Acción",
+      "etiqueta": "Orientado a acción"
+     },
+     {
+      "grupo": "Pensamiento",
+      "etiqueta": "Orientado a pensamiento"
+     }
+    ]
+   },
+   "nota": "Fórmulas del material: Cerebro (3+12+21) · Monitor evaluador (2+11+20) · Investigador de recursos (8+17+26) · Cohesionador (6+15+24) · Implementador (4+13+22) · Coordinador (7+16+25) · Finalizador (9+18+27) · Impulsor (1+10+19) · Especialista (5+14+23).",
+   "dimensiones": [
+    {
+     "codigo": "CER",
+     "nombre": "Cerebro",
+     "grupo": "Pensamiento",
+     "orden": 1,
+     "desempate": 0.09
+    },
+    {
+     "codigo": "MON",
+     "nombre": "Monitor evaluador",
+     "grupo": "Pensamiento",
+     "orden": 2,
+     "desempate": 0.08
+    },
+    {
+     "codigo": "ESP",
+     "nombre": "Especialista",
+     "grupo": "Pensamiento",
+     "orden": 3,
+     "desempate": 0.07
+    },
+    {
+     "codigo": "COO",
+     "nombre": "Coordinador",
+     "grupo": "Personas",
+     "orden": 4,
+     "desempate": 0.06
+    },
+    {
+     "codigo": "INV",
+     "nombre": "Investigador de recursos",
+     "grupo": "Personas",
+     "orden": 5,
+     "desempate": 0.05
+    },
+    {
+     "codigo": "COH",
+     "nombre": "Cohesionador",
+     "grupo": "Personas",
+     "orden": 6,
+     "desempate": 0.04
+    },
+    {
+     "codigo": "IMP",
+     "nombre": "Impulsor",
+     "grupo": "Acción",
+     "orden": 7,
+     "desempate": 0.03
+    },
+    {
+     "codigo": "IMN",
+     "nombre": "Implementador",
+     "grupo": "Acción",
+     "orden": 8,
+     "desempate": 0.02
+    },
+    {
+     "codigo": "FIN",
+     "nombre": "Finalizador",
+     "grupo": "Acción",
+     "orden": 9,
+     "desempate": 0.01
+    }
+   ],
+   "preguntas": [
+    {
+     "numero": 1,
+     "seccion": null,
+     "texto": "Dile que no y después ya veremos si hay que negociar",
+     "dimension": "IMP"
+    },
+    {
+     "numero": 2,
+     "seccion": null,
+     "texto": "Si no estoy totalmente convencido, no soy capaz de decirlo",
+     "dimension": "MON"
+    },
+    {
+     "numero": 3,
+     "seccion": null,
+     "texto": "De pequeñas tonterías, suelo sacar grandes ideas",
+     "dimension": "CER"
+    },
+    {
+     "numero": 4,
+     "seccion": null,
+     "texto": "Mi trabajo no es fácil, pero no me importa",
+     "dimension": "IMN"
+    },
+    {
+     "numero": 5,
+     "seccion": null,
+     "texto": "Cuando tengo mi trabajo delante no necesito mucho más",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 6,
+     "seccion": null,
+     "texto": "A todo el mundo le veo un lado valioso",
+     "dimension": "COH"
+    },
+    {
+     "numero": 7,
+     "seccion": null,
+     "texto": "Gestionar bien a otros es mi mejor garantía de resultados",
+     "dimension": "COO"
+    },
+    {
+     "numero": 8,
+     "seccion": null,
+     "texto": "Uso sin reparos lo que ya está hecho",
+     "dimension": "INV"
+    },
+    {
+     "numero": 9,
+     "seccion": null,
+     "texto": "La clave la encuentro casi siempre en la letra pequeña",
+     "dimension": "FIN"
+    },
+    {
+     "numero": 10,
+     "seccion": null,
+     "texto": "Siempre es posible hacer algo más",
+     "dimension": "IMP"
+    },
+    {
+     "numero": 11,
+     "seccion": null,
+     "texto": "He de pensar lo que dices, ya te contestaré",
+     "dimension": "MON"
+    },
+    {
+     "numero": 12,
+     "seccion": null,
+     "texto": "A mayor problema, tengo mayor estímulo",
+     "dimension": "CER"
+    },
+    {
+     "numero": 13,
+     "seccion": null,
+     "texto": "En el equipo termino haciendo mi trabajo y el de otros",
+     "dimension": "IMN"
+    },
+    {
+     "numero": 14,
+     "seccion": null,
+     "texto": "Reunirnos es la mejor forma de retrasar el trabajo",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 15,
+     "seccion": null,
+     "texto": "Todo me resulta fácil cuando me adapto a los demás",
+     "dimension": "COH"
+    },
+    {
+     "numero": 16,
+     "seccion": null,
+     "texto": "Quien discrepa nos ayuda a conseguir el objetivo",
+     "dimension": "COO"
+    },
+    {
+     "numero": 17,
+     "seccion": null,
+     "texto": "No espero de otros lo que puedo conseguir yo",
+     "dimension": "INV"
+    },
+    {
+     "numero": 18,
+     "seccion": null,
+     "texto": "Prefiero saber “mucho de algo” que no “poco de mucho”",
+     "dimension": "FIN"
+    },
+    {
+     "numero": 19,
+     "seccion": null,
+     "texto": "Odio decir las cosas dos veces",
+     "dimension": "IMP"
+    },
+    {
+     "numero": 20,
+     "seccion": null,
+     "texto": "Si tengo que improvisar, me supone un mal rato",
+     "dimension": "MON"
+    },
+    {
+     "numero": 21,
+     "seccion": null,
+     "texto": "Siempre encuentro una solución, es cuestión de tiempo",
+     "dimension": "CER"
+    },
+    {
+     "numero": 22,
+     "seccion": null,
+     "texto": "Siempre empiezo por lo que me resulta más difícil",
+     "dimension": "IMN"
+    },
+    {
+     "numero": 23,
+     "seccion": null,
+     "texto": "El trabajo bien acabado es para mí la mejor recompensa",
+     "dimension": "ESP"
+    },
+    {
+     "numero": 24,
+     "seccion": null,
+     "texto": "Me sirve, si a ti te sirve",
+     "dimension": "COH"
+    },
+    {
+     "numero": 25,
+     "seccion": null,
+     "texto": "Si puedo, no decido sin los demás",
+     "dimension": "COO"
+    },
+    {
+     "numero": 26,
+     "seccion": null,
+     "texto": "Si puedo sacar dos por qué conformarme con uno",
+     "dimension": "INV"
+    },
+    {
+     "numero": 27,
+     "seccion": null,
+     "texto": "Las cosas las hago paso a paso y esto me sirve",
+     "dimension": "FIN"
+    }
+   ],
+   "interpretaciones": []
+  },
+  {
+   "codigo": "M01",
+   "orden": 7,
+   "tipo": "MATRIZ",
+   "motor": "MATRIZ",
+   "nombre": "Matriz · Creencias limitantes y expansivas",
+   "descripcion": "Creencias limitantes y expansivas (Yo / Equipo) y su reencuadre.",
+   "instruccion": "Identifica creencias tuyas y de tu equipo. Reencuadre: 1) identifica 2) entiende de dónde viene 3) define cómo verla distinto 4) repite.",
+   "escala": {},
+   "config": {
+    "max_filas": 10,
+    "ejemplo": {
+     "ambito": "Yo",
+     "limitante": "No tengo tiempo para desarrollar a mi equipo.",
+     "origen": "Años resolviendo todo yo mismo para cumplir la meta.",
+     "expansiva": "Desarrollar a mi equipo me libera tiempo y multiplica resultados.",
+     "anclaje": "La repito cada lunes en la reunión de planificación."
+    }
+   },
+   "nota": null,
+   "dimensiones": [],
+   "preguntas": [],
+   "interpretaciones": [],
+   "columnas": [
+    {
+     "orden": 1,
+     "clave": "ambito",
+     "etiqueta": "Ámbito",
+     "tipo": "lista",
+     "opciones": [
+      "Yo",
+      "Equipo"
+     ],
+     "autofuente": null
+    },
+    {
+     "orden": 2,
+     "clave": "limitante",
+     "etiqueta": "Creencia limitante",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 3,
+     "clave": "origen",
+     "etiqueta": "¿De dónde viene?",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 4,
+     "clave": "expansiva",
+     "etiqueta": "Creencia expansiva (reencuadre)",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 5,
+     "clave": "anclaje",
+     "etiqueta": "Cómo la voy a repetir / anclar",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    }
+   ],
+   "fijas": []
+  },
+  {
+   "codigo": "M02",
+   "orden": 8,
+   "tipo": "MATRIZ",
+   "motor": "MATRIZ",
+   "nombre": "Matriz · Detonantes emocionales (SCARF)",
+   "descripcion": "Tus detonantes emocionales y la estrategia para cada uno.",
+   "instruccion": "Para cada categoría escribe tus propios detonantes y la estrategia que usarás para manejarlos. La columna gris es una referencia del material.",
+   "escala": {},
+   "config": {
+    "max_filas": null,
+    "ejemplo": null
+   },
+   "nota": null,
+   "dimensiones": [],
+   "preguntas": [],
+   "interpretaciones": [],
+   "columnas": [
+    {
+     "orden": 1,
+     "clave": "categoria",
+     "etiqueta": "Categoría",
+     "tipo": "fijo",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 2,
+     "clave": "referencia",
+     "etiqueta": "Referencia (ejemplos)",
+     "tipo": "fijo",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 3,
+     "clave": "detonantes",
+     "etiqueta": "Mis detonantes",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 4,
+     "clave": "estrategia",
+     "etiqueta": "Mi estrategia",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    }
+   ],
+   "fijas": [
+    {
+     "orden": 1,
+     "valor": "Estatus",
+     "referencia": "Comparaciones, crítica en público"
+    },
+    {
+     "orden": 2,
+     "valor": "Certeza",
+     "referencia": "Cambios repentinos, falta de información"
+    },
+    {
+     "orden": 3,
+     "valor": "Autonomía",
+     "referencia": "Decisiones impuestas, microgestión"
+    },
+    {
+     "orden": 4,
+     "valor": "Conexión",
+     "referencia": "Exclusión, distancia relacional"
+    },
+    {
+     "orden": 5,
+     "valor": "Justicia",
+     "referencia": "Trato desigual percibido"
+    }
+   ]
+  },
+  {
+   "codigo": "M03",
+   "orden": 9,
+   "tipo": "MATRIZ",
+   "motor": "MATRIZ",
+   "nombre": "Matriz · Mapa mental de mi equipo y clientes",
+   "descripcion": "Sistema, factor y metaprograma de tu equipo, jefes, pares y clientes.",
+   "instruccion": "Registra el mapa mental de colaboradores, jefes, pares, brokers y clientes. La fila YO se llena sola con tus tests.",
+   "escala": {},
+   "config": {
+    "max_filas": 11,
+    "ejemplo": {
+     "nombre": "Broker A",
+     "relacion": "Broker",
+     "sistema": "Visual",
+     "factor": "Logro",
+     "global_detalle": "Global",
+     "estructura_opciones": "Opciones",
+     "estrategia": "Propuesta en 1 lámina con comparativo gráfico, meta clara y 2 alternativas de cobertura."
+    },
+    "fila_yo": true,
+    "relacion_yo": "Yo"
+   },
+   "nota": null,
+   "dimensiones": [],
+   "preguntas": [],
+   "interpretaciones": [],
+   "columnas": [
+    {
+     "orden": 1,
+     "clave": "nombre",
+     "etiqueta": "Nombre",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 2,
+     "clave": "relacion",
+     "etiqueta": "Relación",
+     "tipo": "lista",
+     "opciones": [
+      "Yo",
+      "Colaborador",
+      "Jefe",
+      "Par",
+      "Broker",
+      "Cliente"
+     ],
+     "autofuente": null
+    },
+    {
+     "orden": 3,
+     "clave": "sistema",
+     "etiqueta": "Sistema representacional",
+     "tipo": "lista",
+     "opciones": [
+      "Visual",
+      "Auditivo",
+      "Kinestésico"
+     ],
+     "autofuente": "T02.principal"
+    },
+    {
+     "orden": 4,
+     "clave": "factor",
+     "etiqueta": "Factor motivacional",
+     "tipo": "lista",
+     "opciones": [
+      "Logro",
+      "Poder",
+      "Afiliación"
+     ],
+     "autofuente": "T03.principal"
+    },
+    {
+     "orden": 5,
+     "clave": "global_detalle",
+     "etiqueta": "Global / Detalle",
+     "tipo": "lista",
+     "opciones": [
+      "Global",
+      "Detalle",
+      "Equilibrado"
+     ],
+     "autofuente": "T04.parte1"
+    },
+    {
+     "orden": 6,
+     "clave": "estructura_opciones",
+     "etiqueta": "Estructura / Opciones",
+     "tipo": "lista",
+     "opciones": [
+      "Estructura",
+      "Opciones",
+      "Equilibrado"
+     ],
+     "autofuente": "T04.parte2"
+    },
+    {
+     "orden": 7,
+     "clave": "estrategia",
+     "etiqueta": "Estrategia de comunicación",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    }
+   ],
+   "fijas": []
+  },
+  {
+   "codigo": "M04",
+   "orden": 10,
+   "tipo": "MATRIZ",
+   "motor": "MATRIZ",
+   "nombre": "Matriz · Niveles de liderazgo (Maxwell)",
+   "descripcion": "Nivel en el que te observa cada colaborador y tu estrategia.",
+   "instruccion": "Para cada colaborador: ¿en qué nivel te observa? ¿qué evidencia tienes? ¿qué harás para subir de nivel?",
+   "escala": {},
+   "config": {
+    "max_filas": 16,
+    "ejemplo": {
+     "colaborador": "Colaborador 1",
+     "nivel": "2 · Permiso",
+     "evidencia": "Me busca para consultas, pero aún no confía en proponer.",
+     "estrategia": "Delegarle la cuenta de un broker mediano con criterios claros.",
+     "fecha_revision": "30/11"
+    }
+   },
+   "nota": null,
+   "dimensiones": [],
+   "preguntas": [],
+   "interpretaciones": [],
+   "columnas": [
+    {
+     "orden": 1,
+     "clave": "colaborador",
+     "etiqueta": "Colaborador",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 2,
+     "clave": "nivel",
+     "etiqueta": "Nivel en el que me observa",
+     "tipo": "lista",
+     "opciones": [
+      "1 · Posición",
+      "2 · Permiso",
+      "3 · Resultados",
+      "4 · Desarrollo de personas",
+      "5 · Trascendencia"
+     ],
+     "autofuente": null
+    },
+    {
+     "orden": 3,
+     "clave": "evidencia",
+     "etiqueta": "Evidencia (¿por qué lo creo?)",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 4,
+     "clave": "estrategia",
+     "etiqueta": "Estrategia para subir de nivel",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 5,
+     "clave": "fecha_revision",
+     "etiqueta": "Fecha de revisión",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    }
+   ],
+   "fijas": []
+  },
+  {
+   "codigo": "M05",
+   "orden": 11,
+   "tipo": "MATRIZ",
+   "motor": "MATRIZ",
+   "nombre": "Matriz · Curva del cambio",
+   "descripcion": "Señales y estrategias por etapa del cambio.",
+   "instruccion": "Identifica en qué etapa estás tú y tu equipo frente a un cambio real, qué señales notas y qué harás como líder.",
+   "escala": {},
+   "config": {
+    "max_filas": null,
+    "ejemplo": null,
+    "campo_extra": {
+     "clave": "cambio",
+     "etiqueta": "Cambio que estamos viviendo:"
+    }
+   },
+   "nota": null,
+   "dimensiones": [],
+   "preguntas": [],
+   "interpretaciones": [],
+   "columnas": [
+    {
+     "orden": 1,
+     "clave": "etapa",
+     "etiqueta": "Etapa",
+     "tipo": "fijo",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 2,
+     "clave": "quienes",
+     "etiqueta": "¿Quiénes están aquí?",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 3,
+     "clave": "senales",
+     "etiqueta": "Señales en mi entorno (¿qué noto?)",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 4,
+     "clave": "estrategia",
+     "etiqueta": "Estrategia como líder (¿qué haré?)",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    }
+   ],
+   "fijas": [
+    {
+     "orden": 1,
+     "valor": "Optimismo desinformado",
+     "referencia": null
+    },
+    {
+     "orden": 2,
+     "valor": "Pesimismo informado",
+     "referencia": null
+    },
+    {
+     "orden": 3,
+     "valor": "Crisis existencial",
+     "referencia": null
+    },
+    {
+     "orden": 4,
+     "valor": "Realismo esperanzado",
+     "referencia": null
+    },
+    {
+     "orden": 5,
+     "valor": "Optimismo informado",
+     "referencia": null
+    },
+    {
+     "orden": 6,
+     "valor": "Asimilación",
+     "referencia": null
+    }
+   ]
+  },
+  {
+   "codigo": "M06",
+   "orden": 12,
+   "tipo": "MATRIZ",
+   "motor": "MATRIZ",
+   "nombre": "Matriz · Roles de equipo",
+   "descripcion": "Rol de cada colaborador y actividades a asignar.",
+   "instruccion": "Determina el rol de cada colaborador (idealmente con su test) y las actividades que le asignarías según su rol.",
+   "escala": {},
+   "config": {
+    "max_filas": 13,
+    "ejemplo": {
+     "nombre": "Colaborador 1",
+     "rol_principal": "Implementador",
+     "segundo_rol": "Finalizador",
+     "actividades": "Seguimiento semanal de renovaciones y control de pendientes de emisión."
+    },
+    "fila_yo": true,
+    "relacion_yo": "Yo"
+   },
+   "nota": null,
+   "dimensiones": [],
+   "preguntas": [],
+   "interpretaciones": [],
+   "columnas": [
+    {
+     "orden": 1,
+     "clave": "nombre",
+     "etiqueta": "Nombre",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 2,
+     "clave": "rol_principal",
+     "etiqueta": "Rol principal",
+     "tipo": "lista",
+     "opciones": [
+      "Cerebro",
+      "Monitor evaluador",
+      "Especialista",
+      "Coordinador",
+      "Investigador de recursos",
+      "Cohesionador",
+      "Impulsor",
+      "Implementador",
+      "Finalizador"
+     ],
+     "autofuente": "T06.principal"
+    },
+    {
+     "orden": 3,
+     "clave": "segundo_rol",
+     "etiqueta": "Segundo rol",
+     "tipo": "lista",
+     "opciones": [
+      "Cerebro",
+      "Monitor evaluador",
+      "Especialista",
+      "Coordinador",
+      "Investigador de recursos",
+      "Cohesionador",
+      "Impulsor",
+      "Implementador",
+      "Finalizador"
+     ],
+     "autofuente": "T06.secundario"
+    },
+    {
+     "orden": 4,
+     "clave": "actividades",
+     "etiqueta": "Posibles actividades a asignar por su rol",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    }
+   ],
+   "fijas": []
+  },
+  {
+   "codigo": "M07",
+   "orden": 13,
+   "tipo": "MATRIZ",
+   "motor": "MATRIZ",
+   "nombre": "Mi plan de acción (próximos 15 días)",
+   "descripcion": "Resumen automático de tus 6 resultados + tu plan de acción.",
+   "instruccion": "MI PLAN DE ACCIÓN (próximos 15 días)",
+   "escala": {},
+   "nota": null,
+   "config": {
+    "max_filas": null,
+    "ejemplo": {
+     "que": "Ej.: Adaptar mi reporte semanal para mi colaborador de Detalle",
+     "con_quien": "Ej.: Ejecutivo de cuentas, reunión de lunes",
+     "fecha_medicion": "Ej.: 12/10 · Pedirle feedback después de 2 semanas"
+    }
+   },
+   "dimensiones": [],
+   "preguntas": [],
+   "interpretaciones": [],
+   "fijas": [],
+   "columnas": [
+    {
+     "orden": 1,
+     "clave": "que",
+     "etiqueta": "Qué voy a hacer",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 2,
+     "clave": "con_quien",
+     "etiqueta": "Con quién / dónde",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    },
+    {
+     "orden": 3,
+     "clave": "fecha_medicion",
+     "etiqueta": "Fecha y cómo lo mediré",
+     "tipo": "texto",
+     "opciones": null,
+     "autofuente": null
+    }
+   ]
+  }
+ ]
+};
+
+/* preview_boot.js — Solo para la VISTA PREVIA (navegador sin Apps Script): siembra datos de demostración
+   y emula google.script.run con la misma lógica de Api.gs sobre una base en memoria. No forma parte del despliegue. */
+(function () {
+  var seed = 11, rnd = function () { return (seed = (seed * 16807) % 2147483647) / 2147483647; }, pick = function (a) { return a[Math.floor(rnd() * a.length)]; };
+  Api.sembrar(SEED, 'Publicada');
+  Api.crearAdmin('admin', 'Administrador de demostración', 'Admin2026seg');
+  Db._tablas.Usuarios.forEach(function (u) { u.debe_cambiar_clave = false; });
+  var A = Api.ejecutar(null, 'login', { usuario: 'admin', clave: 'Admin2026seg' }).data.token;
+  ['Sucursal demo 1', 'Sucursal demo 2', 'Sucursal demo 3'].forEach(function (n) { Api.ejecutar(A, 'catalogoGuardar', { tabla: 'Sucursales', nombre: n }); });
+  ['Área demo A', 'Área demo B', 'Área demo C'].forEach(function (n) { Api.ejecutar(A, 'catalogoGuardar', { tabla: 'Areas', nombre: n }); });
+  var cat = Api.ejecutar(A, 'sesion', {}).data.catalogos;
+  function respuestas(def) {
+    var r = {}, m = def.evaluacion.motor, qs = def.preguntas;
+    if (m === 'ESCALA_AREAS') qs.forEach(function (q) { r[q.id_pregunta] = 1 + Math.floor(rnd() * 5); });
+    if (m === 'ESCALA_FACTORES') qs.forEach(function (q) { r[q.id_pregunta] = 1 + Math.floor(rnd() * 5); });
+    if (m === 'MARCAS_EXACTAS') qs.slice().sort(function () { return rnd() - .5; }).slice(0, 20).forEach(function (q) { r[q.id_pregunta] = 1; });
+    if (m === 'ELECCION_BINARIA') qs.forEach(function (q) { r[q.id_pregunta] = pick(['A', 'B']); });
+    if (m === 'SITUACIONAL') qs.forEach(function (q) { r[q.id_pregunta] = pick(['a', 'b', 'c', 'd']); });
+    if (m === 'ESCALA_DISCRETA') qs.forEach(function (q) { r[q.id_pregunta] = pick([1, 3, 6, 9]); });
+    return r;
+  }
+  for (var i = 1; i <= 12; i++) {
+    var n = (i < 10 ? '0' : '') + i, usr = i === 1 ? 'ana' : 'colab' + n;
+    Api.ejecutar(A, 'usuarioGuardar', { usuario: usr, nombre: i === 1 ? 'Colaborador demo 01' : 'Colaborador demo ' + n, cargo: 'Cargo demo', id_sucursal: cat.sucursales[i % 3].id_sucursal, id_area: cat.areas[(i * 2) % 3].id_area, rol: 'Colaborador', clave: 'Demo2026ok' });
+  }
+  Db._tablas.Usuarios.forEach(function (u) { u.debe_cambiar_clave = false; });
+  for (var j = 1; j <= 12; j++) {
+    var u = j === 1 ? 'ana' : 'colab' + (j < 10 ? '0' : '') + j, T = Api.ejecutar(null, 'login', { usuario: u, clave: 'Demo2026ok' }).data.token;
+    var hacer = j === 1 ? 4 : Math.floor(rnd() * 7);            // ana deja 2 tests pendientes
+    Api.ejecutar(T, 'misEvaluaciones', {}).data.filter(function (e) { return e.tipo === 'TEST'; }).slice(0, hacer).forEach(function (e) {
+      var def = Api.ejecutar(T, 'evaluacionDef', { id_evaluacion: e.id_evaluacion }).data;
+      Api.ejecutar(T, 'enviarRespuestas', { id_evaluacion: e.id_evaluacion, respuestas: respuestas(def) });
+    });
+  }
+  Db.cacheDel('ses:' + A);
+  function Runner() {
+    var ok = function () {}, fail = function () {}, r = {
+      withSuccessHandler: function (f) { ok = f; return r; }, withFailureHandler: function (f) { fail = f; return r; },
+      api: function (t, a, p) { setTimeout(function () { try { ok(JSON.parse(JSON.stringify(Api.ejecutar(t, a, p)))); } catch (e) { fail(e); } }, 140); } };
+    return r;
+  }
+  window.google = { script: { run: { withSuccessHandler: function (f) { return Runner().withSuccessHandler(f); }, withFailureHandler: function (f) { return Runner().withFailureHandler(f); } } } };
+  new MutationObserver(function () {
+    var c = document.querySelector('.login .card');
+    if (c && !c.querySelector('.demo')) { var p = document.createElement('p'); p.className = 'demo small muted';
+      p.textContent = 'Vista previa con datos de demostración. Administrador: admin / Admin2026seg · Colaborador: ana / Demo2026ok'; c.append(p); }
+  }).observe(document.documentElement, { childList: true, subtree: true });
+})();
+
+})(); }</script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#060818">
   <title>Evaluaciones · Talento Humano</title>
-  <meta name="app-version" content="1.2.0">
+  <meta name="app-version" content="1.6.0">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -26,7 +3779,59 @@
    Para aplicar la marca corporativa basta con cambiar los tokens de :root.
    ========================================================================== */
 
+/* Tema por defecto «Sobrio»: azul pizarra mate, superficies sólidas, sin brillos. Cambiar con window.ADS_TEMA = 'sobrio' | 'claro' | 'galaxia'. */
 :root {
+  color-scheme: dark;
+  --bg: #0c1322;  --surface: #131c30;  --surface-2: #1a2540;
+  --ink: #e9eef8; --ink-2: #aab6cd;  --ink-3: #8190ab;
+  --line: #2a3857; --line-2: #202c47;
+  --pri: #6aa6dc;  --pri-strong: #8dbde6;  --pri-ink: #08121f;  --pri-soft: #1d3050;
+  --star: #d9a93f; --star-soft: #342d1a;
+  --sky: #0f1830;  --sky-2: #1d2b52;  --sky-ink: #e9eef8;  --sky-dim: #9fadc9;
+  --ok: #4fb68b;   --ok-soft: #14302a;   --warn: #d9a441;  --warn-soft: #352b14;
+  --bad: #e58585;  --bad-soft: #3a1f24;
+  --s1: #3987e5;   --s2: #d95926;   --s3: #199e70;   --s4: #c98500;
+  --r-sm: 8px; --r-md: 12px; --r-lg: 20px;
+  --glass-line: rgba(165,182,255,.20);
+  --sh: 0 1px 2px rgba(0,0,0,.35), 0 8px 24px rgba(0,0,0,.25);
+  --focus: 0 0 0 3px rgba(106,166,220,.45);
+  --f-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Figtree", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --nav-h: 64px;
+}
+
+html[data-tema="galaxia"], .login {
+  color-scheme: dark;
+  /* Galaxia · superficies de vidrio sobre un cielo profundo */
+  --bg: #060818;  --surface: rgba(15,21,58,.70);  --surface-2: rgba(30,40,100,.55);
+  --ink: #eef1ff; --ink-2: #b6c0ef;  --ink-3: #8b97cc;
+  --line: rgba(150,168,255,.26); --line-2: rgba(150,168,255,.14);
+  /* Marca: celeste ADS (acción) y Estrella (logro; solo "encendido/completado") */
+  --pri: #52d0f5;  --pri-strong: #8be2ff;  --pri-ink: #04102b;  --pri-soft: rgba(82,208,245,.16);
+  --star: #ffc857; --star-soft: rgba(255,200,87,.16);
+  --nebula: #8b6cff;
+  /* Cielo: paneles fijos (hero, resultado) */
+  --sky: #070b24;  --sky-2: #231f7a;  --sky-ink: #eef1ff;  --sky-dim: #a3afe0;
+  /* Estados (siempre con icono/etiqueta, nunca solo color) */
+  --ok: #4ee0a1;   --ok-soft: rgba(78,224,161,.15);   --warn: #ffcf6b;  --warn-soft: rgba(255,207,107,.15);
+  --bad: #ff8c9b;  --bad-soft: rgba(255,110,130,.17);
+  /* Serie categórica validada para fondo oscuro (orden fijo): azul · naranja · aqua · amarillo */
+  --s1: #3987e5;   --s2: #d95926;   --s3: #199e70;   --s4: #c98500;
+  /* Forma y luz */
+  --r-sm: 8px; --r-md: 12px; --r-lg: 20px;
+  --glass-line: rgba(165,182,255,.20);
+  --sh: 0 1px 0 rgba(255,255,255,.05) inset, 0 12px 40px rgba(2,4,22,.55);
+  --glow: 0 0 0 1px rgba(82,208,245,.4), 0 8px 30px rgba(82,208,245,.28);
+  --focus: 0 0 0 3px rgba(82,208,245,.55);
+  /* Tipografía */
+  --f-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Figtree", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --nav-h: 64px;
+}
+
+
+html[data-tema="claro"] {
+  color-scheme: light;
   /* Superficies y tinta */
   --bg: #edf1f4;  --surface: #ffffff;  --surface-2: #f4f7f9;
   --ink: #0e2837; --ink-2: #47606f;    --ink-3: #6b8190;
@@ -50,19 +3855,7 @@
   --f-body: "Figtree", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --nav-h: 64px;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0a1720; --surface: #10222e; --surface-2: #0c1d28;
-    --ink: #e6eff4; --ink-2: #a6bbc8; --ink-3: #7d94a3;
-    --line: #25404f; --line-2: #1b3240;
-    --pri: #3cb7cc; --pri-strong: #6fd0e0; --pri-ink: #06242b; --pri-soft: #12404a;
-    --star-soft: #3a2f10;
-    --ok: #46c08a; --ok-soft: #12382a; --warn: #f0b94f; --warn-soft: #3a2d0e; --bad: #ff8a7c; --bad-soft: #42201b;
-    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
-    --sh: 0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
-    --focus: 0 0 0 3px rgba(60,183,204,.45);
-  }
-}
+html[data-tema="claro"] { --glass-line: #d7e0e6; --sh: 0 1px 2px rgba(14,40,55,.06), 0 6px 20px rgba(14,40,55,.06); --focus: 0 0 0 3px rgba(10,107,125,.35); --sky: #0c2233; --sky-2: #163750; --sky-ink: #e9f1f6; --sky-dim: #8fa8b9; --star: #f2b632; --star-soft: #fff1cc; }
 
 /* ───────── base ───────── */
 *, *::before, *::after { box-sizing: border-box; }
@@ -401,6 +4194,123 @@ textarea.input { min-height: 88px; resize: vertical; line-height: 1.45; }
 .tbl th { position: sticky; top: 0; background: var(--surface-2); font-weight: 650; }
 .tbl td.bad { color: var(--bad); font-weight: 600; } .tbl td.okc { color: var(--ok); font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow: auto; }
+
+/* ═════════ v1.4.0 · Temas (Sobrio por defecto · Claro · Galaxia) y fondo de cielo ═════════
+   Principios: (1) el fondo nunca compite con la tarea: estrellas tenues y lentas, contraste del texto ≥ 4.5:1 sobre vidrio;
+   (2) la luz señala acción (celeste) y logro (dorado); (3) todo movimiento se apaga con "reducir movimiento". */
+.galaxia { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; transition: opacity .4s; }
+#app { position: relative; z-index: 1; }
+
+/* Fondo según la vista: el inicio es siempre cielo completo; dentro de la app depende del tema */
+html { background: #060818; }
+body { background:
+    radial-gradient(75% 55% at 82% 6%, rgba(104,70,224,.30), transparent 62%),
+    radial-gradient(70% 55% at 8% 92%, rgba(20,152,196,.22), transparent 62%),
+    radial-gradient(60% 50% at 50% 48%, rgba(44,32,120,.28), transparent 72%),
+    linear-gradient(180deg, #050716 0%, #090c28 55%, #0c1036 100%) fixed; }
+html[data-vista="app"]:not([data-tema="galaxia"]) body { background: linear-gradient(180deg, #0c1322 0%, #0e172a 100%) fixed; }
+html[data-vista="app"]:not([data-tema="galaxia"]) .galaxia { opacity: .32; }
+html[data-vista="app"][data-tema="claro"] body { background: #edf1f4; }
+html[data-vista="app"][data-tema="claro"] .galaxia { display: none; }
+html[data-vista="app"][data-tema="claro"] { background: #edf1f4; }
+html[data-vista="app"]:not([data-tema="galaxia"]) .flow { background: var(--bg); }
+@media (prefers-reduced-motion: no-preference) {
+  .main > * { animation: entra .45s cubic-bezier(.2,.7,.2,1) both; }
+  @keyframes entra { from { opacity: 0; transform: translateY(8px); } }
+}
+
+/* El inicio de sesión conserva siempre el look Galaxia, sea cual sea el tema interno */
+.login .input, .login select.input { background: rgba(8,12,40,.55); }
+.login .input:focus { background: rgba(8,12,40,.8); }
+.login .btn-pri { background: linear-gradient(135deg, #5fd8ff 0%, #3f8cff 100%); border-color: transparent; color: #04102b; box-shadow: 0 6px 22px rgba(63,140,255,.35); }
+.login .btn-pri:hover { background: linear-gradient(135deg, #8be6ff 0%, #5aa0ff 100%); box-shadow: 0 0 0 1px rgba(82,208,245,.4), 0 8px 30px rgba(82,208,245,.28); }
+.login .pw .eye { color: var(--ink-2); }
+
+/* Tema «Galaxia» (cristal y luz) — opcional */
+html[data-tema="galaxia"] .panel, html[data-tema="galaxia"] .ev, html[data-tema="galaxia"] .q, html[data-tema="galaxia"] .counter { -webkit-backdrop-filter: blur(14px) saturate(125%); backdrop-filter: blur(14px) saturate(125%); }
+html[data-tema="galaxia"] .panel, html[data-tema="galaxia"] .ev, html[data-tema="galaxia"] .q { border-color: var(--glass-line); }
+html[data-tema="galaxia"] .ev, html[data-tema="galaxia"] .panel { transition: transform .25s cubic-bezier(.2,.7,.2,1), border-color .25s, box-shadow .25s; }
+@media (hover: hover) { html[data-tema="galaxia"] .ev:hover { transform: translateY(-2px); border-color: rgba(82,208,245,.45); box-shadow: var(--sh), 0 10px 36px rgba(82,208,245,.12); } }
+html[data-tema="galaxia"] .ev.done { border-color: rgba(255,200,87,.35); }
+html[data-tema="galaxia"] .input, html[data-tema="galaxia"] select.input, html[data-tema="galaxia"] textarea.input { background: rgba(8,12,40,.55); }
+html[data-tema="galaxia"] .input:focus { background: rgba(8,12,40,.8); }
+html[data-tema="galaxia"] select.input option { background: #0c1236; color: var(--ink); }
+html[data-tema="galaxia"] .btn { background: rgba(30,40,100,.45); border-color: var(--glass-line); }
+html[data-tema="galaxia"] .btn:hover { background: rgba(60,76,170,.5); border-color: rgba(165,182,255,.5); }
+html[data-tema="galaxia"] .btn-pri { background: linear-gradient(135deg, #5fd8ff 0%, #3f8cff 100%); border-color: transparent; color: #04102b; box-shadow: 0 6px 22px rgba(63,140,255,.35); }
+html[data-tema="galaxia"] .btn-pri:hover { background: linear-gradient(135deg, #8be6ff 0%, #5aa0ff 100%); border-color: transparent; box-shadow: var(--glow); }
+html[data-tema="galaxia"] .topbar { background: rgba(7,10,36,.72); border-bottom-color: var(--glass-line); }
+html[data-tema="galaxia"] .nav { background: rgba(7,10,36,.78); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); border-color: var(--glass-line); }
+html[data-tema="galaxia"] .nav button[aria-current="page"] { text-shadow: 0 0 14px rgba(82,208,245,.55); }
+@media (min-width: 960px) { html[data-tema="galaxia"] .nav button[aria-current="page"] { background: linear-gradient(90deg, rgba(82,208,245,.20), rgba(139,108,255,.10)); box-shadow: inset 2px 0 0 var(--pri); color: var(--pri-strong); } html[data-tema="galaxia"] .nav button:hover { background: rgba(120,140,255,.10); } }
+html[data-tema="galaxia"] .avatar { background: radial-gradient(circle at 30% 25%, #2d2a8f, #0a0d33); box-shadow: 0 0 0 1px var(--glass-line), 0 0 16px rgba(139,108,255,.4); }
+html[data-tema="galaxia"] .flow { background: radial-gradient(70% 50% at 85% 0%, rgba(104,70,224,.28), transparent 62%), linear-gradient(180deg, #050716 0%, #0a0e2e 100%); }  /* en un test el cielo se aquieta: menos distracción */
+html[data-tema="galaxia"] .flow-head, html[data-tema="galaxia"] .flow-foot { background: rgba(7,10,36,.78); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border-color: var(--glass-line); }
+html[data-tema="galaxia"] .modal { background: rgba(10,15,46,.95); border: 1px solid var(--glass-line); box-shadow: 0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(139,108,255,.12); }
+html[data-tema="galaxia"] .scrim { background: rgba(3,5,20,.66); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+html[data-tema="galaxia"] .sky { background: radial-gradient(110% 140% at 88% -12%, rgba(124,84,255,.50), transparent 58%), radial-gradient(90% 120% at 0% 110%, rgba(25,160,205,.22), transparent 60%), linear-gradient(160deg, #0b1038, #090a2a); border: 1px solid var(--glass-line); box-shadow: var(--sh); }
+html[data-tema="galaxia"] .result-hero { background: radial-gradient(110% 140% at 90% -20%, rgba(124,84,255,.55), transparent 60%), linear-gradient(160deg, #0b1038, #090a2a); border: 1px solid var(--glass-line); box-shadow: var(--sh), 0 0 60px rgba(139,108,255,.15); }
+html[data-tema="galaxia"] .situ { background: linear-gradient(160deg, rgba(35,31,122,.7), rgba(9,10,42,.85)); border: 1px solid var(--glass-line); }
+html[data-tema="galaxia"] .constel .on .core { filter: drop-shadow(0 0 6px rgba(255,200,87,.8)); }
+html[data-tema="galaxia"] .tabs button[aria-selected="true"] { background: rgba(82,208,245,.16); color: var(--pri-strong); box-shadow: inset 0 0 0 1px rgba(82,208,245,.4); }
+html[data-tema="galaxia"] .tbl th { background: #141b4a; }
+html[data-tema="galaxia"] .toast { background: #eef1ff; color: #060818; }
+html[data-tema="galaxia"] .switch::after { background: #eef1ff; }
+
+
+
+/* ───────── inicio inmersivo ───────── */
+.login { background: transparent; min-height: 100dvh; }
+.login .in { max-width: 1080px; padding: 28px 22px 36px; gap: 22px; align-content: center; grid-template-columns: 1fr; }
+.login .hero { display: grid; gap: 22px; align-content: center; min-width: 0; }
+.login .side { display: grid; gap: 16px; align-content: center; min-width: 0; }
+.login .brand-ads .lg { box-shadow: 0 0 0 1px rgba(255,255,255,.4), 0 8px 30px rgba(82,208,245,.25); }
+.login h1 { font-size: clamp(38px, 10vw, 68px); line-height: 1.02; background: linear-gradient(180deg, #ffffff 30%, #b9c4ff 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.login p { font-size: 17px; }
+.login .card { background: rgba(11,16,50,.72); border: 1px solid var(--glass-line); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); box-shadow: 0 24px 70px rgba(2,4,22,.6), 0 0 0 1px rgba(139,108,255,.10), 0 0 80px rgba(82,208,245,.08); }
+.cielo-svg { width: 100%; max-width: 560px; height: auto; overflow: visible; }
+.cielo-svg .cl { fill: none; stroke: rgba(196,210,255,.6); stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
+.cielo-svg .cs { fill: #fff; }
+.cielo-svg .ch { fill: url(#cg); }
+@media (max-width: 959px) { .cielo-svg { max-height: 150px; } .login .hero { gap: 14px; } .login .in { align-content: start; } }
+@media (min-width: 960px) {
+  .login .in { grid-template-columns: minmax(0, 1.25fr) minmax(360px, 440px); gap: 56px; align-items: center; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .cielo-svg .cl { stroke-dasharray: 1; stroke-dashoffset: 1; animation: traza 2.6s cubic-bezier(.3,.6,.2,1) .5s forwards; }
+  .cielo-svg .cs, .cielo-svg .ch { opacity: 0; animation: nace .8s ease forwards; animation-delay: var(--d); }
+  .cielo-svg .ch { animation: nace .8s ease var(--d) forwards, respira 4.5s ease-in-out calc(var(--d) + .8s) infinite alternate; }
+  @keyframes traza { to { stroke-dashoffset: 0; } }
+  @keyframes nace { to { opacity: 1; } }
+  @keyframes respira { from { opacity: .5; } to { opacity: 1; } }
+}
+
+/* ═════════ Tema «Blanco» (v1.6.0): cielo mate de fondo + «islas» de papel claro para información y menús ═════════
+   Fondo y títulos siguen el azul pizarra mate (tokens por defecto); cada panel/menú redeclara tokens claros, así textos, bordes,
+   gráficos y estados de su interior se ven como en el tema claro (contraste AA) sin tocar el resto del código. */
+html[data-tema="blanco"] .panel, html[data-tema="blanco"] .kpis, html[data-tema="blanco"] .ev, html[data-tema="blanco"] .q, html[data-tema="blanco"] .opt, html[data-tema="blanco"] .scale button, html[data-tema="blanco"] .chip, html[data-tema="blanco"] .counter, html[data-tema="blanco"] .note, html[data-tema="blanco"] .nav, html[data-tema="blanco"] .topbar, html[data-tema="blanco"] .flow-head, html[data-tema="blanco"] .flow-foot, html[data-tema="blanco"] .modal, html[data-tema="blanco"] .mrow, html[data-tema="blanco"] .conclusion, html[data-tema="blanco"] .perfil {
+  --surface: #f8fafd; --surface-2: #eef2f8; --ink: #14213d; --ink-2: #455676; --ink-3: #66769a;
+  --line: #d3dbe8; --line-2: #e3e9f2;
+  --pri: #1f6fb8; --pri-strong: #15548d; --pri-ink: #ffffff; --pri-soft: #e1eefb;
+  --star: #d79a14; --star-soft: #fdf0cf;
+  --ok: #1b8a5a; --ok-soft: #dff3e9; --warn: #8a5a00; --warn-soft: #fff0cc; --bad: #b42318; --bad-soft: #fde4e1;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --sh: 0 1px 2px rgba(3,8,24,.25), 0 10px 28px rgba(3,8,24,.30); --focus: 0 0 0 3px rgba(31,111,184,.35);
+  color: var(--ink);
+}
+html[data-tema="blanco"] .panel, html[data-tema="blanco"] .kpis, html[data-tema="blanco"] .ev, html[data-tema="blanco"] .q { border-color: rgba(255,255,255,.55); }
+html[data-tema="blanco"] .nav, html[data-tema="blanco"] .topbar, html[data-tema="blanco"] .flow-head, html[data-tema="blanco"] .flow-foot { background: #f4f7fb; border-color: #d3dbe8; }
+html[data-tema="blanco"] .nav button[aria-current="page"] { background: #e1eefb; color: #15548d; }
+html[data-tema="blanco"] .nav .brand, html[data-tema="blanco"] .topbar .brand { color: #14213d; }
+html[data-tema="blanco"] .avatar { background: #14213d; color: #f2c14e; box-shadow: none; }
+html[data-tema="blanco"] .modal { background: #f8fafd; border: 0; box-shadow: 0 30px 80px rgba(0,0,0,.55); }
+html[data-tema="blanco"] .input, html[data-tema="blanco"] select.input, html[data-tema="blanco"] textarea.input { background: #ffffff; color: #14213d; border-color: #c4cfe0; }
+html[data-tema="blanco"] .input::placeholder { color: #7686a3; }
+html[data-tema="blanco"] .btn-pri { background: #1f6fb8; color: #fff; border-color: #1f6fb8; }
+html[data-tema="blanco"] .btn-pri:hover { background: #15548d; border-color: #15548d; }
+html[data-tema="blanco"] .login .btn-pri { background: linear-gradient(135deg, #5fd8ff 0%, #3f8cff 100%); color: #04102b; border-color: transparent; }
+html[data-tema="blanco"] .login .input { background: rgba(8,12,40,.55); color: #eef1ff; border-color: rgba(150,168,255,.26); }
+html[data-tema="blanco"] .toast { background: #f8fafd; color: #14213d; }
 </style>
 
 </head>
@@ -421,7 +4331,7 @@ textarea.input { min-height: 88px; resize: vertical; line-height: 1.45; }
 /* ───────────────────────── 0 · Utilidades ───────────────────────── */
 const S = { token: null, user: null, cat: { sucursales: [], areas: [] }, vista: 'dash', evTab: 'tests', usrFiltro: { q: '', estado: '', rol: '' }, catTab: 'Sucursales', dash: { id_sucursal: '', id_area: '' }, onCerrar: null };
 const AVISO = 'Los tests 1, 2, 5 y 6 provienen del material del Programa de Liderazgo Multiplicador (Encuentro 1). Los tests 3 y 4 fueron diseñados para este programa como herramientas de autoconocimiento, inspirados en McClelland y en la teoría de metaprogramas; no son instrumentos psicométricos validados.';
-const VERSION = '1.2.0';
+const VERSION = '1.6.0';
 const LOGO_ADS = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAPgAAABbCAMAAABph7h5AAAAYFBMVEX///////7///n+///Z//b7/f72/v/p8vfN+PrO3Oqy0eSVs9JE3/EAxvIAse0Ar/IAr9pzncUAqPFtlMVagLI2bKsQTpoCO5IAMZMALJYAKooAIIwIGYIcE3AADYcAAIER6eN6AAAIRUlEQVR42uVbiZLjKBIFciQs8IXFIYko9P9/uZkgfFTX7Lo8WxFThoh2yTLXI/O9TJCasW8UzmC3YwCstQJidzkjctZe2SNw0R5sLg6X465BezM4Nwp8d2wU+P7SJnB+aBQ4HE6nJoHvjo0C359aBM6BYRRv0eJAUbxBcQMgireo6kJdmuQ4o0S9SYvD+dQm8P7cpsXFnijeIseJ4i0CpyjeJPAdaVuDwLm6nNvk+KFR4LgXPzYJfKN4e8D3TQIHovjp1CJwOm47tejqu2OjwNWpUeCV4q1xHBoCXp6Ccw6dMi6E8/HSAnBCzfGPJNARy8dyPjWyHwepjZtinOdlWpYPRP7OCQxkQzOGlvaEeSpljh8Z+eUNgW+v9CBsqa2PKVbQuXxQiYT8/SzOOWcw6JFAL8v0UJYMPHv7+wFHTtuwkH/Pyzw9Qt+Ak8K9EXDOOCjtkNME+ssSP9YMfEXku2+rxr+0dAh6SSnF/1KKvQn8et4J/iRzeOHPv7RoY8fRUCmfXxZ/V/aH/TPlgCX/2f9mbuzr3gzDGWn7s+V8OKj+N78IyVU5VD8dj5cSz28rUZYDS7k456vL5XRGW/eM/279A74vqToB3zKZz8DLxYWer50OGfQ7vPvJmSp5GwFfP87HvwF+PJJ370o29BYv+4LYn8maBBwLIS++f9o+ydBHsvTm3Px93u5W+RWYyzV7vRwzsy+V4wf1F0a693unm2x+tXjJ24nT6Pyn4t7ilvG/G3R1tTh5OynZJt4gOHvngjY/nT5uyAvoJg7fUOEq7uR2fwFnbRSBCpeI4bh5i5q9Lam/2mvtY96wzksaeFP/H6kLMyGfp6ljTRUEXizuWHPAy9mEaRA4mTyqNoEvQbYJPDpoE3gyolGLq5/ah/EXGsA/6uA7wH+M4pgUfWtBuYD+E3Doxc8Bn3+M4qakws/nku5DPdhYRfdjFp+naH5qe2LWbwEXzK3Dg4XV+mPAMV99jOKbd9LnH/s1KP/449kM5DZfebVZ1WNjhnt9AUSBP7rOfbokt4o8f8rkPo3O/2A/vAp8WW4U/5tnJeJObAQo3V0fqjweWjw250xX4PxPwfpqKG6TfPhNJsu/nk2tgn9fODjJwG806qWU5SCZ807KrgzRKSXLZDkMQ4dmJDhw8w8yn5T4ge2H6/qDHPor8EENm61AwEDdPdQtIIcBNuBYX8lPwAVIGuT6lYYWQHOS8CLwLVHvXVqx2J4GdnRpaDhDd0n+BOgppdWHUQE4nyc2+oENk5cB2zFLNaPNG72OvkSfVDb8gj8EiplqcWpKqwGf6451NRAijRh87GhR6DoZvELgV7p7uon9laHB4tASu8tDv6TqleLg6IGbJ1b1LmitrUI6mnVUasxUM6sZBo17d6zrU0fzdfilm+bgrdNgR6OxvSXSu9WpQRNwju0sXk+rEmyY/eKsV70zVPc6ZS6XaLBSmDt0CRf1oBwKI5ex1hiSoylJzsKc15yG7qeQh35N1SvFeXmFIsSOq1WL7OdCpRHDK6ktkx8OBOeaHAHnVoBHSYtg0XI8C4/oPc4dsVIzrKs4p5AkBNPRA+9CMrgs6KfYKZch1Fc3XMqzt9it0BQL6Mde3ICbKAXLAujL4QENzXy0uFAvhjNfpadILQnrkNCdMsHHQjqN81Jr5gQtBQJf4Do6ftzJC9EUQujo98zxMal8WE3mB+/rcxm65ypwDFtAOm4QeOc920x6DzyvGLVy4QbcLfKl0/8uLFMcN5phD8qMNjuxW6dRkYD42VrrXEDQ6GwFjM7A70fvNqoqPdoQZa7KcxgmTqJrQp66JuBb8OqUtjZM26Rzp4LqSCZjsA4HncjLYhW3YUrBFB8vFrd56BePjjLwmitx1AnvRgTOOZg5RdsjoQLOgZ65Kw4ujbIjjyXg8wPw2j7Y0eM3hWJ8BR7mEpgJXAXOaCxrqquzcdW82LUjdyPgqDcdu1ocdc6lFDXF+kn+P4DP1VwokZ7WwKaenqMAKpPlaPG+hl4ufUhojayprlBgc/U8upwnkkkigUIxvAL3RYxyGleBy4SazLjzUDOdElp05tktabklMNjdMM6kBFt//xi4r180KRoTNhUDIdcQwph0zay49j3F+RIB0A/z6MPV4qpYzWIrGYtVFHkw6lZOw3wWwgKVUjqkVgWO3lC4oVcpwC9KfAK+TUlRdCM537SkWv8V4LfjtiKmvYuwDUTSo+Ki6Y0iUngbVAcdbBJmsmDFgVeLZ7kXPc4Fo0CJv7lLnTxGA6FR+7FBcW6T1xNdqARyVPuynRlX7E+nMFT/rhYvXinjKPhI6so6xM8zcHgRuL7thBZrUJuSFCpgSHY0AM43uXGkbAEnhJ4evCOiaZQAY5eJFDsUtx8Sth/9TGshp+S1cUvGl2O6SSTGcirAFaoBjjXPG8849YeBfUZrCrCYBhlj0QmQElUFMPKbgLkARoAZ205ZnNDtxYsWvyXqgLkRTReXW/uIlxg/cIesbMSMyfeYwwUSeMy5RsriMGPyWnsksXU5aRSq3MrmGjANTFZ5ciIw2MM6EsbOuQ0o1VXGX9NNhf3ORuMCo19oSiIxRLPB223PNIa4RqfIG3VIdWjnXnX16OG2d4AeHrYTNb73eL9kI3RvwCBEv9w9YfxqpwT93TXl5eKx00+7OX53hyICwJXZ9WQG7ud527G8sqfuahR/5njkqkR2+fVnk92Unj9RxyyJrMZ7b9nvB77IZz0FXd0SIwcX5a8/lO1uUfx/l96ixrmQ3Bs8fejmpylOiiM1biYlvMEhPCzPb2Xf6n0JmIYXng+8wfOmLvSsydLZNnGjWr0Hjv8AL3u5iyDbCCUAAAAASUVORK5CYII=';
 const SERIE = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)'];
 const CORTO = { ESCALA_AREAS: 'Rueda de la vida', MARCAS_EXACTAS: 'VAK', ESCALA_FACTORES: 'Motivación', ELECCION_BINARIA: 'Metaprogramas', SITUACIONAL: 'Liderazgo', ESCALA_DISCRETA: 'Roles' };
@@ -517,7 +4427,7 @@ function mostrarSecreto(titulo, texto, nota) {
 
 /* ───────────────────────── 1 · Conexión con Apps Script ───────────────────────── */
 /** Llama a Code.gs → api(token, accion, payload). Devuelve una promesa con `data` o lanza Error(mensaje). */
-const API_URL = window.ADS_API_URL || '';   // Hosting externo (Bolt/GitHub): la URL de Apps Script (/exec) se define en public/config.js. Vacío = dentro de Apps Script.
+const API_URL = window.ADS_API_URL || '';   // Hosting externo (Bolt/GitHub): la URL de Apps Script (/exec) se define en index.html (bloque CONFIGURACIÓN, al inicio del <head>). Vacío = dentro de Apps Script.
 function respuesta(r, res, rej) {
   if (r && r.ok) return res(r.data);
   const e = new Error((r && r.error) || 'Error desconocido'); e.codigo = r && r.codigo; e.detalles = r && r.detalles;
@@ -531,7 +4441,7 @@ function api(accion, payload) {
         .withFailureHandler(e => rej(new Error((e && e.message) || 'Error de conexión'))).api(S.token, accion, payload || {});
     }
     if (!API_URL) return rej(new Error('Sin conexión con Google Apps Script.'));
-    if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(API_URL)) return rej(new Error('Falta configurar la URL de Apps Script en public/config.js.'));
+    if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(API_URL)) return rej(new Error('Falta configurar la URL de Apps Script en index.html (bloque CONFIGURACIÓN).'));
     // Hosting externo: POST como text/plain (evita el preflight CORS que Apps Script no responde)
     fetch(API_URL, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ token: S.token, accion, payload: payload || {} }) })
       .then(r => r.text()).then(t => { let j; try { j = JSON.parse(t); } catch (x) { return rej(new Error('El servidor no respondió con datos válidos. Verifica que la implementación de Apps Script permita acceso a "Cualquier persona" y esté actualizada.')); } respuesta(j, res, rej); })
@@ -1404,9 +5314,9 @@ function cargarListaCatalogo(tabla, items, sing, recargar) {
       if (n.length > 80) largas.push(n); else if (existentes.has(k)) ya.push(n); else if (vistos.has(k)) rep.push(n); else { vistos.add(k); nuevas.push(n); }
     });
     const chips = (arr, cls) => arr.slice(0, 40).map(n => h('span', { class: 'pill ' + cls }, n)).concat(arr.length > 40 ? [h('span', { class: 'muted small' }, '… y ' + (arr.length - 40) + ' más')] : []);
-    resumen.replaceChildren(
+    resumen.replaceChildren(...[
       h('div', { class: 'row-flex' }, h('span', { class: 'pill ok' }, nuevas.length + ' por crear'), ya.length ? h('span', { class: 'pill' }, ya.length + ' ya existen (se omiten)') : null, rep.length ? h('span', { class: 'pill' }, rep.length + ' repetidas en la lista') : null, largas.length ? h('span', { class: 'pill bad' }, largas.length + ' superan 80 caracteres') : null),
-      nuevas.length ? h('div', { class: 'chips' }, chips(nuevas, 'ok')) : null);
+      nuevas.length ? h('div', { class: 'chips' }, chips(nuevas, 'ok')) : null].filter(Boolean));
   };
   ta.addEventListener('input', analizar);
   const arch = h('input', { type: 'file', class: 'input', 'aria-label': 'Archivo con la lista', accept: '.txt,.csv,.xlsx,.xls', onchange: async e => { const f = e.target.files[0]; if (!f) return; try { ta.value = await archivoATexto(f); analizar(); } catch (x) { toast(x.message, true); } } });
@@ -1464,9 +5374,9 @@ function cargarListaUsuarios(datos, recargar) {
       filas.push(f);
     });
     const ok = filas.filter(f => !f.err).length;
-    vista.replaceChildren(h('div', { class: 'row-flex' }, h('span', { class: 'pill ok' }, ok + ' listos para crear'), filas.length - ok ? h('span', { class: 'pill bad' }, (filas.length - ok) + ' con error (se omiten)') : null),
+    vista.replaceChildren(...[h('div', { class: 'row-flex' }, h('span', { class: 'pill ok' }, ok + ' listos para crear'), filas.length - ok ? h('span', { class: 'pill bad' }, (filas.length - ok) + ' con error (se omiten)') : null),
       filas.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', null, h('tr', null, ['Estado', 'Nombre', 'Usuario', 'Cargo', 'Sucursal', 'Área', 'Rol'].map(t => h('th', null, t)))),
-        h('tbody', null, filas.map(f => h('tr', null, f.err ? h('td', { class: 'bad' }, '✕ ' + f.err) : h('td', { class: 'okc' }, '✓ Listo'), h('td', null, f.nombre), h('td', null, f.usuario || '—', f.generado ? h('span', { class: 'muted small' }, ' (auto)') : null), h('td', null, f.cargo), h('td', null, f.sucN || f.suc), h('td', null, f.areN || f.are), h('td', null, f.rolFinal || f.rol)))))) : null);
+        h('tbody', null, filas.map(f => h('tr', null, f.err ? h('td', { class: 'bad' }, '✕ ' + f.err) : h('td', { class: 'okc' }, '✓ Listo'), h('td', null, f.nombre), h('td', null, f.usuario || '—', f.generado ? h('span', { class: 'muted small' }, ' (auto)') : null), h('td', null, f.cargo), h('td', null, f.sucN || f.suc), h('td', null, f.areN || f.are), h('td', null, f.rolFinal || f.rol)))))) : null].filter(Boolean));
   };
   [ta, defSuc, defAre, defRol].forEach(x => x.addEventListener(x === ta ? 'input' : 'change', analizar));
   const arch = h('input', { type: 'file', class: 'input', 'aria-label': 'Archivo con la lista de usuarios', accept: '.txt,.csv,.xlsx,.xls', onchange: async e => { const f = e.target.files[0]; if (!f) return; try { ta.value = await archivoATexto(f); analizar(); } catch (x) { toast(x.message, true); } } });
@@ -1548,6 +5458,7 @@ function menuUsuario() {
 }
 function salir() { S.token = null; S.user = null; store('tok', null); pantallaLogin(); }
 function armarApp() {
+  document.documentElement.dataset.vista = 'app';
   const items = menuNav();
   const nav = h('nav', { class: 'nav', 'aria-label': 'Principal' }, h('div', { class: 'brand' }, logo(), h('div', null, 'Evaluaciones', h('small', null, 'Talento Humano'))),
     items.map(([v, t, i]) => h('button', { type: 'button', 'data-v': v, onclick: () => ir(v), 'aria-current': 'false' }, ico(i), t)),
@@ -1562,15 +5473,78 @@ async function entrar(sesion) {
   if (S.user.debe_cambiar_clave) await dialogoClave(true);
   armarApp();
 }
+/* ───────────────────────── Fondo galaxia (canvas) y constelación del inicio ───────────────────────── */
+/** Cielo fijo detrás de toda la app: vía láctea pre-renderizada + estrellas que titilan + una fugaz ocasional.
+ *  Sobrio por diseño: ~30 fps, DPR ≤ 2, pausa con la pestaña oculta y sin animación si el usuario pidió reducir movimiento. */
+function galaxia() {
+  const cv = h('canvas', { class: 'galaxia', 'aria-hidden': 'true' }); document.body.prepend(cv);
+  const ctx = cv.getContext('2d'); if (!ctx) return;
+  const quieto = matchMedia('(prefers-reduced-motion: reduce)');
+  let W = 0, H = 0, dpr = 1, banda = null, est = [], fugaz = null, proxFugaz = 0, ultimo = 0, raf = 0, sem = 20260101;
+  const rnd = () => (sem = (sem * 16807) % 2147483647) / 2147483647;
+  const gauss = () => { let s = 0; for (let i = 0; i < 4; i++) s += rnd(); return (s - 2) / 0.58; };
+  function armar() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2); W = window.innerWidth; H = window.innerHeight;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    // Vía láctea: banda diagonal de polvo estelar + nebulosas, dibujada una sola vez a media resolución
+    const bw = Math.round(W / 2), bh = Math.round(H / 2); banda = document.createElement('canvas'); banda.width = bw; banda.height = bh;
+    const b = banda.getContext('2d'); b.translate(bw / 2, bh / 2); b.rotate(-0.42);
+    const largo = Math.hypot(bw, bh), sig = bh * 0.15;
+    b.globalCompositeOperation = 'lighter';
+    [[-.30, 0, 150, 'rgba(105,70,230,.20)'], [.12, .08, 190, 'rgba(36,150,200,.15)'], [.34, -.06, 130, 'rgba(160,80,200,.13)'], [-.05, -.05, 230, 'rgba(70,60,190,.16)']].forEach(([x, y, r, c]) => {
+      const R = r * (bh / 400 + .6), g = b.createRadialGradient(x * largo, y * bh, 0, x * largo, y * bh, R); g.addColorStop(0, c); g.addColorStop(1, 'rgba(0,0,0,0)'); b.fillStyle = g; b.fillRect(-largo, -bh, largo * 2, bh * 2);
+    });
+    const n = Math.min(9000, Math.round(bw * bh / 55)), tonos = ['190,205,255', '255,240,225', '160,190,255', '215,180,255'];
+    for (let i = 0; i < n; i++) {
+      const x = (rnd() - .5) * largo * 1.1, y = gauss() * sig, d = Math.exp(-(y * y) / (2 * sig * sig * 1.6));
+      b.fillStyle = 'rgba(' + tonos[Math.floor(rnd() * 4)] + ',' + (0.05 + rnd() * 0.5 * d).toFixed(3) + ')'; b.fillRect(x, y, rnd() < .12 ? 1.6 : 1, rnd() < .12 ? 1.6 : 1);
+    }
+    est = []; const total = Math.max(70, Math.min(230, Math.round(W * H / 8500)));
+    for (let i = 0; i < total; i++) {
+      const g = rnd() < .08;
+      est.push({ x: rnd() * W, y: rnd() * H, r: g ? .9 + rnd() * .9 : .35 + rnd() * .65, a: g ? .75 + rnd() * .25 : .25 + rnd() * .5, v: .4 + rnd() * 1.6, f: rnd() * 6.28, dx: .004 + rnd() * .014, c: rnd() < .22 ? '170,200,255' : rnd() < .12 ? '255,225,190' : '255,255,255', g });
+    }
+  }
+  function pintar(t) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+    ctx.globalAlpha = .95; ctx.drawImage(banda, 0, 0, W, H); ctx.globalAlpha = 1;
+    for (const s of est) {
+      const a = s.a * (quieto.matches ? 1 : .68 + .32 * Math.sin(t / 1000 * s.v + s.f));
+      ctx.fillStyle = 'rgba(' + s.c + ',' + a.toFixed(3) + ')'; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.2832); ctx.fill();
+      if (s.g) { ctx.strokeStyle = 'rgba(' + s.c + ',' + (a * .35).toFixed(3) + ')'; ctx.lineWidth = .6; ctx.beginPath(); ctx.moveTo(s.x - s.r * 4, s.y); ctx.lineTo(s.x + s.r * 4, s.y); ctx.moveTo(s.x, s.y - s.r * 4); ctx.lineTo(s.x, s.y + s.r * 4); ctx.stroke(); }
+      if (!quieto.matches) { s.x -= s.dx; if (s.x < -2) s.x = W + 2; }
+    }
+    if (fugaz) {
+      const k = (t - fugaz.t0) / 900;
+      if (k >= 1) fugaz = null; else {
+        const x = fugaz.x + fugaz.vx * k * 380, y = fugaz.y + fugaz.vy * k * 380, g = ctx.createLinearGradient(x, y, x - fugaz.vx * 90, y - fugaz.vy * 90);
+        g.addColorStop(0, 'rgba(255,255,255,' + (1 - k).toFixed(2) + ')'); g.addColorStop(1, 'rgba(255,255,255,0)'); ctx.strokeStyle = g; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - fugaz.vx * 90, y - fugaz.vy * 90); ctx.stroke();
+      }
+    } else if (t > proxFugaz) { fugaz = { t0: t, x: rnd() * W * .7 + W * .15, y: rnd() * H * .4, vx: .86, vy: .5 }; proxFugaz = t + 9000 + rnd() * 9000; }
+  }
+  function cuadro(t) { raf = requestAnimationFrame(cuadro); if (t - ultimo < 32) return; ultimo = t; pintar(t); }
+  function iniciar() { cancelAnimationFrame(raf); if (quieto.matches) pintar(0); else { proxFugaz = performance.now() + 5000; raf = requestAnimationFrame(cuadro); } }
+  let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { armar(); iniciar(); }, 150); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) cancelAnimationFrame(raf); else iniciar(); });
+  if (quieto.addEventListener) quieto.addEventListener('change', iniciar);
+  armar(); iniciar();
+}
+/** Constelación del inicio (dos figuras de estrellas unidas por líneas que se trazan al cargar). */
 function cielo() {
-  const svg = svgEl('svg', { class: 'stars-bg', viewBox: '0 0 400 800', preserveAspectRatio: 'xMidYMid slice', 'aria-hidden': 'true' });
-  let s = 7; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
-  for (let i = 0; i < 70; i++) svg.append(svgEl('circle', { cx: rnd() * 400, cy: rnd() * 800, r: .5 + rnd() * 1.3, fill: '#e9f1f6', opacity: .25 + rnd() * .55 }));
-  [[300, 120, 3], [332, 190, 2.4], [268, 176, 2.4], [304, 252, 3.2], [345, 152, 1.7]].forEach(([x, y, r]) => svg.append(svgEl('circle', { cx: x, cy: y, r, fill: '#f2b632' })));
-  svg.append(svgEl('path', { d: 'M300 120 304 252M268 176 332 190', stroke: '#8fa8b9', 'stroke-width': 1, 'stroke-opacity': .4, fill: 'none' }));
+  const P = x => [Math.round(x[0] / 786 * 400 * 10) / 10, Math.round(x[1] / 414 * 215 * 10) / 10];
+  const A = [[133, 97], [219, 119], [316, 210], [441, 248], [408, 306], [307, 272], [316, 210]].map(P);
+  const B = [[467, 77], [410, 113], [437, 144], [487, 109], [467, 77]].map(P), C = [[487, 109], [547, 97], [605, 116], [644, 143]].map(P);
+  const svg = svgEl('svg', { class: 'cielo-svg', viewBox: '-6 -6 412 227', role: 'img', 'aria-label': 'Constelación ADS' });
+  svg.append(svgEl('defs', null, svgEl('radialGradient', { id: 'cg' }, svgEl('stop', { offset: '0', 'stop-color': '#ffe9b0', 'stop-opacity': '.9' }), svgEl('stop', { offset: '.35', 'stop-color': '#9fb4ff', 'stop-opacity': '.35' }), svgEl('stop', { offset: '1', 'stop-color': '#9fb4ff', 'stop-opacity': '0' }))));
+  [A, B, C].forEach(pts => svg.append(svgEl('path', { class: 'cl', pathLength: '1', d: 'M' + pts.map(p => p.join(' ')).join(' L') })));
+  let i = 0; new Set([].concat(A, B, C).map(p => p.join(','))).forEach(k => {
+    const [x, y] = k.split(',').map(Number), d = (.4 + i * .12).toFixed(2) + 's', r = 1.7 + ((i * 7) % 5) * .35; i++;
+    svg.append(svgEl('circle', { class: 'ch', cx: x, cy: y, r: r * 5, style: '--d:' + d }), svgEl('circle', { class: 'cs', cx: x, cy: y, r, style: '--d:' + d }));
+  });
   return svg;
 }
 function pantallaLogin(msg) {
+  document.documentElement.dataset.vista = 'login';
   const v = { u: '', c: '' }, err = h('div', { class: 'alert bad', role: 'alert', hidden: !msg }, msg || ''), btn = h('button', { class: 'btn btn-pri btn-block', type: 'submit' }, 'Ingresar');
   const clave = h('input', { class: 'input', id: 'lc', type: 'password', autocomplete: 'current-password', required: true, oninput: e => { v.c = e.target.value; } });
   const ojo = h('button', { class: 'eye', type: 'button', 'aria-label': 'Mostrar clave', 'aria-pressed': 'false', onclick: () => {
@@ -1581,13 +5555,16 @@ function pantallaLogin(msg) {
     catch (x) { err.textContent = x.message; err.hidden = false; btn.disabled = false; btn.textContent = 'Ingresar'; } } },
     h('div', { class: 'field' }, h('label', { for: 'lu' }, 'Usuario'), h('input', { class: 'input', id: 'lu', autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false', required: true, oninput: e => { v.u = e.target.value; } })),
     h('div', { class: 'field' }, h('label', { for: 'lc' }, 'Clave'), h('div', { class: 'pw' }, clave, ojo)), err, btn);
-  $('#app').replaceChildren(h('div', { class: 'login' }, cielo(), h('div', { class: 'in' },
-    h('div', { class: 'brand-ads' }, h('span', { class: 'lg' }, h('img', { src: LOGO_ADS, alt: 'Aseguradora del Sur', width: 124, height: 45 })), h('span', { class: 'tag' }, 'Talento Humano y Cultura')),
-    h('div', { class: 'stack-sm' }, h('h1', null, 'Constelación ADS'), h('p', null, 'Test y Evaluaciones de autoconocimiento')), form,
-    h('p', { class: 'foot' }, 'Atrae, desarrolla, multiplica'))));
+  $('#app').replaceChildren(h('div', { class: 'login' }, h('div', { class: 'in' },
+    h('div', { class: 'hero' },
+      h('div', { class: 'brand-ads' }, h('span', { class: 'lg' }, h('img', { src: LOGO_ADS, alt: 'Aseguradora del Sur', width: 124, height: 45 })), h('span', { class: 'tag' }, 'Talento Humano y Cultura')),
+      h('div', { class: 'stack-sm' }, h('h1', null, 'Constelación ADS'), h('p', null, 'Test y Evaluaciones de autoconocimiento')), cielo()),
+    h('div', { class: 'side' }, form, h('p', { class: 'foot' }, 'Atrae, desarrolla, multiplica')))));
 }
 async function arrancar() {
+  galaxia();
   document.documentElement.dataset.version = VERSION;
+  document.documentElement.dataset.tema = ['blanco', 'sobrio', 'claro', 'galaxia'].includes(window.ADS_TEMA) ? window.ADS_TEMA : 'blanco';   // tema interior (el inicio de sesión siempre es Galaxia)
   const t = store('tok');
   if (t) { S.token = t; try { await entrar(await api('sesion')); return; } catch (e) { S.token = null; store('tok', null); } }
   pantallaLogin();
