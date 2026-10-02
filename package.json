@@ -1,0 +1,11 @@
+{
+  "name": "ads-evaluaciones",
+  "version": "1.6.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node servidor.mjs",
+    "build": "node construir.mjs",
+    "start": "node servidor.mjs"
+  }
+}
